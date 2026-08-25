@@ -1,0 +1,284 @@
+---
+name: nodespace
+description: >
+  Context infrastructure for AI-native development. Read and write the
+  NodeSpace knowledge graph — the durable record of why a system was built
+  and how it should be built: specs, architecture decisions, ADRs, designs,
+  plans, standards, tasks, and findings. Use before writing or changing a
+  spec, ADR, design doc, or plan; when you need the reasoning or constraints
+  behind existing code; when recording a decision or discovery that should
+  outlive this session; or when asked to "check nodespace".
+allowed-tools: Bash(nodespace:*)
+compatibility: Targets NodeSpace app v0.2.2. Requires the `nodespace` CLI on $PATH.
+---
+
+# NodeSpace Skill
+
+NodeSpace is context infrastructure for AI-native development — a local-first knowledge graph running on this machine.
+
+**Repositories contain what was built. NodeSpace contains why it was built, how it should be built, and what agents need to know to build it correctly.** Specs, architecture decisions, ADRs, designs, plans, standards, tasks, and findings live here, not scattered across chat logs and stale docs. Code is the artifact; this is the context behind it.
+
+It persists across sessions — what you save today is searchable tomorrow, and your context window does not survive the turn.
+
+**So: read from NodeSpace before you write code or documents, and write back to it when you decide something.** If you're about to author a spec, an ADR, a design, or a plan — or you need the reasoning and constraints behind existing code — check here first. Whatever the repository cannot tell you about *why*, this can.
+
+## How NodeSpace Thinks (Mental Model)
+
+**Everything is a node.** A node has a type, markdown content, and optional typed properties. Node types are schema-defined: `text`, `task`, and `date` are built-ins; custom types come from user-defined schemas (`nodespace schema list` shows what's registered).
+
+**Built-in node types:**
+- `text` — freeform notes, documents, findings, summaries
+- `task` — structured to-do items; carry `status` (`open`/`in_progress`/`done`/`cancelled`), `due_date` (YYYY-MM-DD), and `priority` (`low`/`medium`/`high`)
+- `date` — daily container nodes (e.g. "2026-05-30"); each day has one. Attach time-sensitive findings under the relevant date node so they're retrievable by day.
+
+**Hierarchy is first-class edges, not nesting.** A node has one parent edge. Children are ordered via fractional ordering — siblings have a stable position without gap-numbering. Moving or reordering a node is an edge operation (change the parent or sibling position), not a recreate-and-delete.
+
+**Relationships are distinct from hierarchy and mentions.** A relationship is a named, schema-defined edge between two nodes (e.g. `billed_to`, `has_task`) — different from the one parent edge and from inline `mention` links captured from markdown content. Relationships must be defined on a schema (via `nodespace schema create`/`nodespace schema update`) before they can be used; `nodespace relationship create` on a node whose schema has no matching relationship name fails.
+
+**Content is markdown.** Store prose, code blocks, lists — whatever fits the note. The export commands render it back as clean markdown.
+
+## When to Use NodeSpace (Session Judgment)
+
+Use NodeSpace as a working memory across sessions:
+
+1. **Search at session start** — run the preflight, then search for prior context before you begin. (`nodespace search "topic"`)
+2. **Save as you go** — save discoveries, decisions, and summaries during the session. Don't wait until the end.
+3. **It persists across sessions** — your context window does not. Anything worth remembering next time should be stored.
+
+Date nodes make temporal retrieval reliable: if a finding is time-bound, attach it under today's date node so future searches can scope by day.
+
+## Shared Workspaces (Multi-User)
+
+A NodeSpace collection can be **synced and shared** with a teammate through NodeSpace Pro. When the daemon is bound to a shared collection, another engineer — or their agent — reads and writes the same graph, so you share context across sessions and across people. It is opt-in and private to its members. When you are working in a shared workspace, adjust how you use NodeSpace:
+
+**You share the whole workspace, not a per-command target.** You do not pick the shared collection per write — the daemon is launched already bound to it, so nodes you create sync into it automatically. Everything you save here is visible to your teammate. Keep private scratch notes in a separate, unshared database (`nodespace database create`/`--database`) if you need them.
+
+**You are not the only writer.** A node here may have been created or last edited by your teammate. Don't assume a node is yours or that its content is stable across your session. Search at session start to pull what your teammate has already saved.
+
+**Attribute what you save.** Put the provenance in the content — who wrote it and when — so a teammate can tell where a note came from (e.g. begin a session summary with your name and the date). NodeSpace records a creator per node, but a human-readable marker helps a teammate scan.
+
+**Prefer additive writes over editing a teammate's node.** Add a new node (a child, or a fresh note) rather than rewriting one your teammate authored. When you must update a shared node, pass the `version` you read via `nodespace node batch-update`, so a concurrent edit surfaces as an OCC conflict instead of silently overwriting it. (`node update` without a version bypasses that check — avoid it for shared nodes.)
+
+**Recall is eventually consistent, and semantic search lags.** A teammate's write appears after sync latency, not instantly. Two caveats are specific to shared sync:
+- **For immediate cross-engineer recall, use structured queries** — `nodespace query` or `nodespace node query --content-contains "..."`. A peer's node is queryable as soon as it syncs.
+- **Semantic `nodespace search` over a teammate's node works only after your machine has embedded it.** Embeddings are generated locally, not synced, so there is a lag and it needs the local inference model loaded. If a recent teammate note isn't in `search` yet, fall back to `nodespace query`.
+
+**Don't file shared memory under date nodes.** The single-user pattern of attaching findings under `--parent "YYYY-MM-DD"` does **not** round-trip through sync yet — date-container nodes stay local. In a shared workspace, save findings as regular nodes (optionally organized under a shared project or collection node), not under a date node, or your teammate won't see them.
+
+**It's private and opt-in.** The shared collection is readable only by its members and syncs only after each engineer has signed in and enabled sync. Don't move sensitive or unrelated notes into it without intent.
+
+## Preflight Check
+
+**Before starting any multi-step NodeSpace operation**, run these two commands to confirm the tooling is present and healthy:
+
+```bash
+nodespace --version
+nodespace diagnostics
+```
+
+Run this preflight once per session or task, not before every individual command.
+
+### Failure recovery
+
+| Symptom | Cause | Recovery |
+|---------|-------|----------|
+| `command not found: nodespace` | CLI not installed or not on `$PATH` | Tell the user NodeSpace CLI is not installed and propose installing it — never run the installer without their explicit confirmation. If they confirm, run `sh -c "$(curl -fsSL https://nodespace.ai/install.sh)" -- --no-gui` (installs the CLI only, non-interactively — the same script the one-line install and `brew install --cask nodespaceai/nodespace/nodespace` both use). Then retry the original command. If it still fails because this shell session hasn't picked up the updated `$PATH`, tell the user to open a new terminal and try again. If they decline the install, stop. |
+| `Could not connect to nodespaced` | Daemon not running | Surface the CLI's own message to the user: start the daemon with `nodespaced`. Do not retry automatically — wait for confirmation. |
+| `diagnostics` shows entries in `errors` | Database issues | Report the specific error messages to the user before continuing. |
+
+## Prerequisites
+
+NodeSpace daemon must be running. The `nodespace` CLI communicates with `nodespaced` over a Unix socket. If the daemon is not running, CLI commands will fail with a connection error.
+
+Start the daemon: `nodespaced` (or it starts automatically on login if installed via DMG).
+
+## Tool Decision Guide
+
+Use this to pick the right command for the task at hand.
+
+### Finding things
+
+| Goal | Command |
+|------|---------|
+| Find nodes by keywords or meaning | `nodespace search "<query>"` |
+| List all nodes of a type | `nodespace search "" --type <type>` |
+| Filter by property values (status, due_date, priority, etc.) | `nodespace query --type <type> --filters '<json>'` |
+| Filter with comparison operators (gt, lt, gte, lte, in) | `nodespace query --type <type> --filters '<json>'` |
+| Exact substring match on content or title | `nodespace node query --content-contains "..."` / `--title-contains "..."` |
+| Get a specific node by ID | `nodespace node get <id>` |
+
+**`nodespace node query` is for exact substring/type matching only** (`--content-contains`, `--title-contains`, `--mentioned-by`, `--type`). It has no property-filter flags.
+
+**`nodespace query` is the command for structured property queries** — status, due_date, priority, or any comparison operator. Examples:
+- "find all my open tasks" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"status","value":"open"}]'`
+- "tasks due tomorrow" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"due_date","value":"<YYYY-MM-DD>"}]' --sorting '[{"field":"due_date","direction":"asc"}]'`
+- "tasks due this week" → `nodespace query --type task --filters '[{"type":"property","operator":"gte","property":"due_date","value":"<week start>"},{"type":"property","operator":"lte","property":"due_date","value":"<week end>"}]'`
+- "high priority tasks" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"priority","value":"high"}]'`
+
+Date format for all date properties: **YYYY-MM-DD**. Available operators: `equals`, `contains`, `gt`, `lt`, `gte`, `lte`, `in`, `exists`. Filter types: `property`, `content`, `relationship`, `metadata`.
+
+**`nodespace search` is semantic** (embedding-based similarity), ranked by relevance. Pass `--type` to narrow to one or more node types, `--limit` to cap results (default 20). It does not currently expose graph-boost, cross-collection exclusion, or edge-inclusion — for those, fall back to `nodespace query` plus a follow-up `nodespace relationship get` if you need connected nodes.
+
+**Multiple topics:** run `nodespace search` once per topic rather than one broad search plus per-result fetches.
+
+## CLI Reference
+
+The complete command reference — every command, flag, argument shape, and output
+format, with worked examples — is in **`references/cli.md`**. Read that file when
+you need exact syntax.
+
+All commands accept `--json` for machine-readable output.
+
+**Selecting a database.** A single daemon can serve several local databases. Data
+commands accept a global `--database <name|id>` flag; `NODESPACE_DATABASE` sets
+the same target when the flag is absent. Without either, requests go to the
+daemon's default database.
+
+```bash
+nodespace --database work node create --type text --content "work note"
+NODESPACE_DATABASE=work nodespace search "meeting notes"
+```
+
+**The schemas on this machine are live data — never assume them.** Node types are
+user-defined and differ per database, so read them at the moment you need them
+rather than relying on anything written here:
+
+```bash
+nodespace schema list --json          # what types exist right now
+nodespace schema get <type> --json    # a type's exact fields before writing one
+```
+
+## Common Agent Tasks
+
+### Save a note for later
+
+```bash
+nodespace node create --type text --content "Key insight: the auth token expires after 1 hour"
+```
+
+### Search for previously stored context
+
+```bash
+nodespace search "authentication token refresh"
+```
+
+### Create a task
+
+```bash
+nodespace node create --type task --content "Implement rate limiting on the API gateway"
+```
+
+### Change a task's status
+
+```bash
+nodespace node set-status <task-id> done
+```
+
+### Organize under a parent
+
+```bash
+# Create a parent project node
+nodespace node create --type text --content "Project: API Redesign"
+# → returns {"id": "abc123", ...}
+
+# Add sub-notes under it
+nodespace node create --type text --content "Decision: use REST not GraphQL" --parent abc123
+```
+
+### Attach a finding to today's date node
+
+Date node IDs are the date string itself (`"2026-05-30"`). Pass the date string directly as `--parent` — the daemon auto-creates the date node if it doesn't exist yet.
+
+```bash
+# Attach a finding under today — date node is created automatically if absent
+nodespace node create --type text --content "Discovered: rate limiter uses fixed windows" --parent "2026-05-30"
+
+# To retrieve an existing date node directly
+nodespace node get "2026-05-30"
+```
+
+### Define a new entity type, then create an instance
+
+```bash
+# 1. Create the schema (one schema per request — see Schema inspection and management above)
+nodespace schema create --params '{"name":"Ticket","description":"A tracked unit of engineering work","fields":[{"name":"status","type":"enum","required":true,"coreValues":[{"value":"ready_for_dev","label":"Ready for Dev"},{"value":"in_dev","label":"In Dev"},{"value":"done","label":"Done"}]},{"name":"assignee","type":"text"}]}'
+
+# 2. Create an instance
+nodespace node create --type ticket --content "Fix flaky retry test" --parent <parent-id>
+nodespace node update <the-new-id> --property assignee=dana --property status=in_dev
+```
+
+### Link two nodes with a typed relationship
+
+```bash
+# Relationship must already be defined on the source's schema (e.g. Ticket.belongs_to_sprint)
+nodespace relationship create --from <ticket-id> --type belongs_to_sprint --to <sprint-id>
+```
+
+### Organize a node into a collection
+
+Use a relationship with `--type member_of` against the collection node. If the collection doesn't exist as a node yet, ask the user to create it first.
+
+```bash
+nodespace relationship create --from <node-id> --type member_of --to <collection-id>
+```
+
+### Delete a node
+
+Deletion is permanent and takes the node's children with it. Resolve the node first and confirm with the user before deleting anything you did not just create — a wrong id here is not recoverable.
+
+```bash
+nodespace node query --content-contains "draft spec"   # resolve the id first
+nodespace node delete <node-id>
+```
+
+If the user wants something out of the way rather than gone, prefer moving it (re-parent it, or drop it from a collection) over deleting it.
+
+### Bulk import from markdown
+
+```bash
+nodespace import file ./notes.md
+nodespace import dir ./docs --auto-collection-routing
+```
+
+Top-level headings become root nodes, sub-headings become children. Report the number of nodes created; don't follow up with search calls to verify.
+
+### Export a document for AI context
+
+```bash
+# Export with OCC tokens so AI can update individual nodes
+nodespace node export <doc-id> --json | jq '.markdown'
+
+# Clean export for reading
+nodespace node export <doc-id> --node-ids false
+```
+
+### Build a knowledge graph session
+
+```bash
+# At session start: preflight check, then search for relevant context
+nodespace --version
+nodespace diagnostics
+nodespace search "previous work on this codebase"
+
+# During session: save discoveries
+nodespace node create --type text --content "Session summary: refactored auth middleware, tests passing"
+```
+
+## Output Format
+
+All `--json` commands output to stdout. Errors are written to stderr with a non-zero exit code.
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "node_type": "text",
+  "content": "Your content",
+  "parent_id": null,
+  "properties": {},
+  "version": 1,
+  "lifecycle_status": "active",
+  "created_at": "2026-01-01T00:00:00Z",
+  "modified_at": "2026-01-01T00:00:00Z"
+}
+```
