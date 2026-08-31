@@ -9,7 +9,7 @@ description: >
   behind existing code; when recording a decision or discovery that should
   outlive this session; or when asked to "check nodespace".
 allowed-tools: Bash(nodespace:*)
-compatibility: Targets NodeSpace app v0.2.2. Requires the `nodespace` CLI on $PATH.
+compatibility: Targets NodeSpace app v0.2.3. Requires the `nodespace` CLI on $PATH.
 ---
 
 # NodeSpace Skill
