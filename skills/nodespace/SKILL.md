@@ -9,7 +9,7 @@ description: >
   behind existing code; when recording a decision or discovery that should
   outlive this session; or when asked to "check nodespace".
 allowed-tools: Bash(nodespace:*)
-compatibility: Targets NodeSpace app v0.2.4. Requires either a shell with the `nodespace` CLI on $PATH, or an MCP client connected to `nodespace mcp` (its bash-less passthrough) -- see Preflight Check in SKILL.md.
+compatibility: Targets NodeSpace app v0.2.5. Requires either a shell with the `nodespace` CLI on $PATH, or an MCP client connected to `nodespace mcp` (its bash-less passthrough) -- see Preflight Check in SKILL.md.
 ---
 
 # NodeSpace Skill
