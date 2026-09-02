@@ -6,12 +6,12 @@
     "url": "https://github.com/NodeSpaceAI"
   },
   "description": "Context infrastructure for AI-native development. Read and write the NodeSpace knowledge graph — the durable record of why a system was built and how it should be built: specs, architecture decisions, ADRs, designs, plans, standards, tasks, and findings. Use before writing or changing a spec, ADR, design doc, or plan; when you need the reasoning or constraints behind existing code; when recording a decision or discovery that should outlive this session; or when asked to \"check nodespace\".",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "plugins": [
     {
       "name": "nodespace",
       "description": "Context infrastructure for AI-native development. Read and write the NodeSpace knowledge graph — the durable record of why a system was built and how it should be built: specs, architecture decisions, ADRs, designs, plans, standards, tasks, and findings. Use before writing or changing a spec, ADR, design doc, or plan; when you need the reasoning or constraints behind existing code; when recording a decision or discovery that should outlive this session; or when asked to \"check nodespace\".",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "license": "MIT",
       "repository": "https://github.com/NodeSpaceAI/nodespace-skill",
       "source": "./"
