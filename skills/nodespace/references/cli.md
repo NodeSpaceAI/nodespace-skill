@@ -11,6 +11,41 @@ judgment calls that a generator cannot produce.
 
 All commands accept `--json` for machine-readable output.
 
+**Node JSON shape.** Every command that emits a node returns objects of this
+shape; list-returning commands wrap them as `{"count": N, "nodes": [...]}`.
+Every key shown below is present on every node, so parse against these names
+and nothing else. `relationship get` may additionally include `title`,
+`mentions` and `mentioned_in`.
+
+The one real exception is a **schema** node reached through `relationship get`.
+It comes back in the schema's own shape rather than the node shape: camelCase
+keys (`isCore`, `schemaVersion`, `description`, `fields`, `relationships`) plus
+a `uri`, and no `node_type` or `properties` at all. Read schemas with
+`schema get` instead of traversing to them.
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "node_type": "task",
+  "content": "Buy groceries",
+  "properties": { "status": "open", "priority": "high" },
+  "version": 1,
+  "lifecycle_status": "active",
+  "created_at": "2026-01-01T00:00:00Z",
+  "modified_at": "2026-01-01T00:00:00Z"
+}
+```
+
+`properties` is a **flat** object keyed by the field names the type's schema
+defines — `jq '.properties.status'` reads a value directly, with no intermediate
+key and no second parse. These are the same bare names that
+`node update --property status=done` and `query --filters '{"property":"status"}'`
+accept, so what you parse and what you type always match. Internal bookkeeping
+keys are not part of the output. A node with no properties set returns `{}`.
+Values of any JSON type round-trip, nested objects included — `--property
+address='{"city":"Berlin"}'` reads back as `.properties.address.city`.
+
+
 **Selecting a database.** A single daemon can serve several local databases. The data commands that read or write a database (`node`, `query`, `search`, `mention`, `schema`, `relationship`, `import`, `diagnostics`) accept a global `--database <name|id>` flag that routes the request to a specific database; the `NODESPACE_DATABASE` environment variable sets the same target when the flag is absent. Without either, requests go to the daemon's default database. Model management (`nodespace model`) is daemon-global — the loaded inference model is shared across all databases, so the flag is accepted but has no effect there. Manage the set of databases with the `nodespace database` subcommands (below).
 
 ```bash
@@ -33,11 +68,26 @@ nodespace node create --type text --content "Meeting notes" --parent <parent-id>
 
 **Output:** JSON with `id`, `node_type`, `content`, `parent_id`, `created_at`
 
-**Creating an instance of a custom type:** read the schema first (`nodespace schema get <type>`) so you know its fields. Use the field name exactly as it appears in the schema's `fields[].name` — do not add namespace prefixes when setting properties on instances (namespace prefixing, where it applies, is a schema-authoring concern — see Schema fields below). If the schema has a `title_template`, `--content` only needs a brief descriptive label — the display title is generated from properties. If there's no `title_template`, set `--content` to the best human-readable name available.
+**Creating an instance of a custom type:** read the schema first (`nodespace schema get <type>`) so you know its fields. Use the field name exactly as it appears in the schema's `fields[].name` — do not add namespace prefixes when setting properties on instances (prefixes like `custom:` are part of a *field's name* at schema-authoring time, not something a caller adds — see Schema fields below). If the schema has a `title_template`, `--content` only needs a brief descriptive label — the display title is generated from properties. If there's no `title_template`, set `--content` to the best human-readable name available.
 
 Only include properties the schema actually defines as required, plus any optional ones the user gave a value for. Don't invent fields.
 
 **Success semantics:** once `node create` returns an ID, the node exists — confirm what was created to the user and stop. Don't immediately `node get` the same ID to verify; the create response is the confirmation.
+
+**If it has headings, it is a tree, not a node.** NodeSpace is one-node-per-block, with hierarchy as first-class edges — a document with sections (an ADR, a spec, a plan) decomposes into a root node plus one child per section, not one node whose `content` holds the whole document:
+
+```bash
+# Multi-call: root, then one child per section
+nodespace node create --type text --content "# ADR-071: Use collections for tagging"
+# → returns {"id": "root-id", ...}
+nodespace node create --type text --content "## Context\n..." --parent root-id
+nodespace node create --type text --content "## Decision\n..." --parent root-id
+
+# Or write it to a file and import it — see `nodespace import` below. This is
+# the normal path for any multi-section content, not only bulk migration,
+# including a single document you just finished authoring.
+nodespace import file ./adr-071.md
+```
 
 ### Get a node
 
@@ -183,6 +233,25 @@ nodespace search "" --type task    # list all nodes of a type (empty query)
 
 **Output:** JSON array of matching nodes
 
+### Import markdown files
+
+```bash
+nodespace import file ./notes.md --collection "docs:rust"
+nodespace import dir ./docs
+nodespace import dir ./docs ./adr ./specs --auto-collection-routing   # several directories, one call
+nodespace import dir ./docs --replace                                # re-import in place
+```
+
+Import is a repeatable sync, not a one-off bulk load: re-running `import dir`/`import file` without `--replace` skips a document already imported (no duplicates), and `--replace` refreshes its child subtree from the fresh parse while keeping the root node — so anything that already links to it stays valid. A first import and a refresh are the same command, just with or without `--replace`.
+
+`import dir` accepts more than one directory in a single call — one process, one summary, instead of a shell loop calling it once per directory. `--auto-collection-routing` still routes each file relative to *its own* directory's root, never a synthesised common ancestor across the directories passed, so two unrelated trees can't produce surprising collection paths. Per-directory failures (a bad path, an unreadable folder) are reported in the combined results rather than aborting the rest. Passing exactly one directory behaves exactly as `import dir <dir>` always has.
+
+`--auto-collection-routing` turns directory structure into collection membership for free — the folder layout becomes the collection hierarchy, no separate tagging step. Combined with `--replace`, markdown-on-disk becomes a viable source of truth: import once to build the tree, re-import to keep it current.
+
+**Options (`import dir`):** `--collection <path>`, `--use-filename-as-title`, `--auto-collection-routing`, `--exclude <pattern>` (repeatable), `--include-agent-files`, `--include-hidden`, `--no-recursive`, `--replace` — see the flag list below for exact semantics.
+
+**Output:** streamed progress events (human mode: `[step/9] name: message` on stderr, plus a pass/fail line per file); JSON mode prints one combined array of `{file_path, root_id, nodes_created, success, error, collection, archived}` once the call completes.
+
 ### Mention relationships
 
 ```bash
@@ -211,6 +280,11 @@ nodespace relationship create --from <source-id> --type billed_to --to <target-i
 # Traverse relationships from a node
 nodespace relationship get <node-id> --type has_task --direction out
 nodespace relationship get <node-id> --type billed_to --direction in
+
+# Traverse the reverse direction by the schema's declared reverseName
+# (adr declares: name decided_by, targetType person, reverseName decisions, reverseCardinality many)
+nodespace relationship get <person-id> --type decisions
+nodespace relationship get <person-id> --type decided_by --direction in   # equivalent
 ```
 
 **Options (`create`):**
@@ -221,8 +295,12 @@ nodespace relationship get <node-id> --type billed_to --direction in
 
 **Options (`get`):**
 - `<id>` — node ID to query relationships for
-- `--type <name>` — relationship name to filter by
-- `--direction <out|in>` — traversal direction (default: `out`)
+- `--type <name>` — relationship name to traverse: the forward `name` from the source's end, or the declared `reverseName` from the target's end
+- `--direction <out|in>` — traversal direction (default: `out`), relative to the name given
+
+**Traversing the reverse direction.** A relationship is declared once, on the source type, but reads from both ends. Given `{"name":"decided_by","targetType":"person","direction":"out","cardinality":"one","reverseName":"decisions","reverseCardinality":"many"}` on `adr`: from the ADR, `nodespace relationship get <adr-id> --type decided_by --direction out`; from the person, use the declared `reverseName` — `nodespace relationship get <person-id> --type decisions` — or the equivalent `--type decided_by --direction in`. Both spellings return the same ADRs, and the output line's arrow shows the direction actually traversed (`<--decided_by--` for an inbound resolution). An empty result means no edges exist, not that reverse traversal is unsupported. A name declared in neither direction is rejected with an error naming the spellings that do work — read it and retry rather than concluding the capability is missing.
+
+Reverse names are for *traversal*, not for `relationship create`: an edge is always created under its forward name, from the source node. They are also not usable in `node query --filters`, whose `relationship` filters cover only the structural graph (`parent`, `children`, `mentions`, `mentioned_by`) — use `relationship get` to traverse a schema-declared name.
 
 Both node IDs must already exist — search for missing IDs first (`nodespace search` / `nodespace node query`). Apart from the built-in names below, the relationship name must be defined on the source node's schema; define it there (`nodespace schema create`/`update`) if it isn't yet. `relationship create` on a node whose schema doesn't define that relationship name fails with an error naming the undefined relationship.
 
@@ -247,19 +325,23 @@ nodespace schema get task
 nodespace schema get person
 
 # Create a new schema
-nodespace schema create --params '{"name":"Ticket","description":"A tracked unit of engineering work","fields":[{"name":"status","type":"enum","required":true,"coreValues":[{"value":"ready_for_dev","label":"Ready for Dev"},{"value":"in_dev","label":"In Dev"},{"value":"done","label":"Done"}]},{"name":"assignee","type":"text"}],"relationships":[{"name":"belongs_to_sprint","targetType":"sprint","direction":"out","cardinality":"one"}]}'
+nodespace schema create --params '{"name":"Ticket","description":"A tracked unit of engineering work","fields":[{"name":"status","type":"enum","required":true,"coreValues":[{"value":"ready_for_dev","label":"Ready for Dev"},{"value":"in_dev","label":"In Dev"},{"value":"done","label":"Done"}]},{"name":"assignee","type":"text"}],"relationships":[{"name":"belongs_to_sprint","targetType":"sprint","direction":"out","cardinality":"one","reverseName":"tickets","reverseCardinality":"many"}]}'
 
 # Create a schema with a unique field — key flagged unique_case_insensitive
 nodespace schema create --params '{"name":"ADR","description":"An architecture decision record","fields":[{"name":"key","type":"text","required":true,"unique_case_insensitive":true},{"name":"status","type":"enum","required":true,"coreValues":[{"value":"proposed","label":"Proposed"},{"value":"accepted","label":"Accepted"},{"value":"superseded","label":"Superseded"}]}]}'
 
 # Update an existing schema — add/remove/rename fields, without re-creating it
 nodespace schema update --params '{"schema_id":"ticket","add_fields":[{"name":"sprint","type":"text"}]}'
+
+# Delete a schema — clear its relationship declarations first (see below)
+nodespace schema update --params '{"schema_id":"adr","remove_relationships":["decided_by","supersedes"]}'
+nodespace schema delete adr
 ```
 
 `create`/`update` take a single JSON `--params` blob (or `--params-file <path>` for a file) rather than per-field flags — the params shape mirrors `CreateSchemaParams`/`UpdateSchemaParams` in the daemon.
 
 <!-- BEGIN GENERATED: schema-rules (see packages/agent/src/skill_rules.rs, packages/cli/examples/gen_skill_md.rs) -->
-**One schema per request.** Create exactly the type asked for, in a single `schema create` call, then stop and report it. Don't proactively create related types the user didn't ask for (e.g. asked for "ADR" — don't also create "Ticket" or "Sprint"), and don't follow up with `schema update` to wire relationships unless explicitly asked. A relationship's `targetType` must already exist (check `nodespace schema list`); if it doesn't, omit the relationship rather than creating the other type as a side effect.
+**One schema per request.** Create exactly the type asked for, in a single `schema create` call, then stop and report it. Don't proactively create related types the user didn't ask for (e.g. asked for "ADR" — don't also create "Ticket" or "Sprint"), and don't follow up with `schema update` to wire relationships unless explicitly asked. A relationship's `targetType` must already exist (check `nodespace schema list`) or be the type this call is creating; if it is neither, omit the relationship rather than creating the other type as a side effect.
 
 If `create` reports the schema already exists, stop and tell the user — they can create instances with `node create` against the existing type.
 
@@ -269,13 +351,47 @@ If `create` rejects the schema with a validation error (not "already exists") �
 
 **Rename vs. relabel:** `rename_fields` can rename a field's storage key or relabel its display name only — see the tool schema for the `from`/`to`/`friendlyName` shape of each. A user asking to relabel what a field is called on screen almost always means the display label, not a storage rename.
 
+**Deleting a schema.** A node type can be removed — `nodespace schema delete <schema_id>`. Reach for it whenever the user asks to remove, drop, undo or clean up a type, including a throwaway type created earlier in the session; never report deletion as unsupported, and never propose stripping a schema to an empty shell as a substitute.
+
+Relationship declarations are the one prerequisite: a schema that still declares relationships, or is still targeted by another type's declaration, is rejected with `schema_has_declarations` and the remaining count. Clear them with `schema update` first, then delete:
+
+```bash
+# 1. Drop the relationships this type declares
+nodespace schema update --params '{"schema_id":"adr","remove_relationships":["decided_by","supersedes"]}'
+# 2. Drop declarations on OTHER types that target it (`schema list --json` shows them)
+nodespace schema update --params '{"schema_id":"ticket","remove_relationships":["related_adr"]}'
+# 3. Delete the schema
+nodespace schema delete adr
+```
+
+This is the mirror of the `targetType` rule above: a relationship's target must **exist** before the relationship can be declared, and must be **absent** before the type it points at can be deleted.
+
+Two scoping notes. Only declarations *between schemas* block the delete — relationship edges between ordinary nodes are instance data and are not counted, so there is no need to unpick those first. And deleting the type does not delete its instances: they remain as nodes of that type, so remove them with `node delete` separately if the user wants them gone too.
+
 **Schema fields:** define only type-specific fields — don't add a `name` or `title` field; every node already has a built-in content/title field. Exception: if `title_template` uses a `{name}` placeholder, `name` must be defined as a field (any placeholder in `title_template` must have a matching field).
 
 **Field source:** derive every field from what the user's own request describes wanting to track — never from another schema shown in the entity-types context. That listing exists so you don't recreate a type that already exists; it is not a shape to copy fields from for a new, unrelated type.
 
 **Enums:** lowercase values with readable labels — `{"value":"in_progress","label":"In Progress"}`.
 
-**Relationships vs. fields:** use a relationship (not a field) when a value references another node type. `targetType` must be an existing schema ID. Examples: `{"name":"supersedes","targetType":"adr","direction":"out","cardinality":"one"}`, `{"name":"has_task","targetType":"task","direction":"out","cardinality":"many"}`.
+**Relationships vs. fields:** use a relationship (not a field) when a value references another node type. `targetType` must be an existing schema ID, or the schema ID of the type being created in the same call. `reverseName` and `reverseCardinality` are **required** on every relationship — a declaration missing either is rejected. One edge is stored and read from both ends, so name it from both: `reverseName` is what the edge is called read from the target (plural where that end may hold many — `invoices`, not `Invoice (Customer)`), and `reverseCardinality` is `one` or `many`, saying how many sources may point at one target. Examples: `{"name":"supersedes","targetType":"adr","direction":"out","cardinality":"one","reverseName":"superseded_by","reverseCardinality":"one"}`, `{"name":"has_task","targetType":"task","direction":"out","cardinality":"many","reverseName":"ticket","reverseCardinality":"one"}`, `{"name":"decided_by","targetType":"person","direction":"out","cardinality":"one","reverseName":"decisions","reverseCardinality":"many"}`.
+
+**Self-referential relationships:** a type may point at itself in the same `schema create` call — give its own schema ID (the snake_case form of the name); no follow-up `schema update` is needed. The required `reverseName` is what names the other direction, so never declare a second relationship for it — one stored edge, readable from both ends: `{"name":"supersedes","targetType":"adr","direction":"out","cardinality":"one","reverseName":"superseded_by","reverseCardinality":"one"}`. The same shape covers `blocks`/`blocked_by` on a task and `parent`/`child` on a category.
+
+**Grouping is collections, not an array field.** Don't declare a `tags`, `categories`, `topics`, `labels`, `areas` or `groups` field — collections already are the tagging and grouping mechanism, with a flat label and a nested path (`docs:rust`) as the same mechanism at two depths. They also cost the same to write: `node create --collection docs:rust` is one argument, repeatable, with missing path segments created for you and no lookup first — exactly the cost of setting one array element. What differs is what you get. An array value renders in no UI, has to be edited on every member to rename, cannot nest, and is invisible to collection queries; a collection does all four, and `member_of` is structural so joining one needs no schema change. If the user explicitly asks for a plain tags field, give them one without arguing.
+
+**Edge fields.** A relationship can carry attributes on the edge itself via `edgeFields` — facts about the *connection*, not about either node (an access level on a membership, a billing date on an invoice link). Give an edge field a fixed vocabulary by declaring it as an enum with `coreValues`, the same shape a node field uses:
+
+```json
+{"name": "access", "type": "enum",
+ "coreValues": [{"value": "owner", "label": "Owner"},
+                {"value": "editor", "label": "Editor"},
+                {"value": "viewer", "label": "Viewer"}]}
+```
+
+`coreValues` is required on an enum edge field and rejected on any other type; a `default` must be one of the declared values; values must be unique. Edge enums are closed — no `userValues`/`extensible` half. Creating or editing an edge validates the value against the declared set (including via `--edge-data`), and the relationships UI renders a picker instead of a free-text box.
+
+Two limits worth knowing. Only relationships you declare can carry `edgeFields`: the built-in structural names (`member_of`, `has_child`, `mentions`, `has_role`) are reserved and rejected as declarations, so an edge field cannot be attached to them. And `required`/`default` on an edge field are recorded but not enforced at write time — an omitted enum key is stored absent rather than filled in from `default`, so don't rely on a default to supply a value.
 
 **Title template:** set `title_template` when a node's identity comes from its fields rather than free-form content, using `{field_name}` placeholders — every placeholder must be a defined field. Omit it if the content/title field alone identifies the node.
 
@@ -283,6 +399,14 @@ If `create` rejects the schema with a validation error (not "already exists") �
 <!-- END GENERATED: schema-rules -->
 
 A `description` field is fine when it adds value beyond the title. Field names are alphanumeric-and-underscore only — the CLAUDE.md-documented `custom:` namespace prefix convention applies to natural-language schema authoring in the local agent, not to explicit `fields` arrays passed here; don't prefix field names when calling `schema create`/`update` directly.
+
+**Recognizing a relationship field.** The "relationships vs. fields" rule above presumes you've already noticed a field is a reference — that recognition step is the hard part. A field naming a **person, team, project, or any other entity** is a reference, even when it reads naturally as text: a plain string has no integrity (`"M. Alibio"` and `"m alibio"` are different values to a query engine), no reverse lookup, and no rename path — renaming a person means rewriting every node that names them. Worked examples, from how a request is phrased:
+
+- "who signed off" → a relationship (`decided_by`, `targetType: person`), not a `deciders: array` field
+- "who it's assigned to" → `assignee`, `targetType: person`, not an `assignee: text` field
+- "which project it affects" → `affects_project`, `targetType: project`
+
+False friends — field names that read as plain attributes but are usually references: `deciders`, `assignee`, `owner`, `author`, `reviewer`, `reported_by`, `members`. Before defaulting one of these to a text field, check whether the target type already exists (`nodespace schema list`). Escape hatch: free text is legitimate for a one-off external party who will never be a node in this graph — use a relationship when the party is, or could become, a first-class entity here.
 
 **Output:** Schema nodes as JSON (same shape as regular nodes; `node_type="schema"`)
 
@@ -329,7 +453,7 @@ Every command, subcommand, and flag below is generated from the CLI's own defini
 **Global flags** (accepted on every command):
 
 - `--json` — Emit raw JSON instead of human-readable output
-- `--socket <SOCKET>` — Override the socket path (default: ~/.nodespace/daemon.sock). Honors the `NODESPACED_SOCKET` environment variable when this flag is absent (env: `NODESPACED_SOCKET`)
+- `--socket <SOCKET>` — Override the socket path. With no flag and no environment variable, the CLI dials ~/.nodespace/daemon.sock, or auto-discovers a running dev/Pro daemon's socket if that one is absent. Honors the `NODESPACED_SOCKET` environment variable when this flag is absent (env: `NODESPACED_SOCKET`)
 - `--database <DATABASE>` — Target a specific local database by name or id (ADR-053). When omitted, requests route to the daemon's default database. Honors the `NODESPACE_DATABASE` environment variable when this flag is absent (env: `NODESPACE_DATABASE`)
 
 ### `nodespace node`
@@ -345,12 +469,17 @@ Operate on individual nodes (get, create, update, delete, children, query, expor
 - `--type <NODE_TYPE>` — Node type, e.g. `text`, `task`, `date` (required)
 - `--content <CONTENT>` — Content (plain text or markdown) (required)
 - `--parent <PARENT>` — Parent node ID (omit to create a root node)
+- `--collection <PATH>` — Collection path to file the node under, `:`-delimited for hierarchy (e.g. `docs:rust`) — the same syntax `import` and `search` take. Missing segments are created. Repeatable to join several collections in one call. Mutually exclusive with --collection-id
+- `--collection-id <ID>` — Collection ID to file the node under (repeatable). Prefer --collection, which takes a readable path and needs no lookup
 
 **`nodespace node update`** — Update an existing node's content and/or properties
 
 - `<ID>` — Node ID to update (required)
 - `--content <CONTENT>` — New content. Omit to leave content unchanged (e.g. when only setting properties)
 - `--property <PROPERTIES>` — Set one or more properties: `--property key=value` (repeatable). Values are parsed as JSON when possible (numbers, booleans, `null`, arrays, objects), otherwise treated as a plain string. Deep-merged into the node's existing properties (unspecified keys are left untouched). Do NOT use this to change a task's status; use `node set-status` instead
+- `--collection <PATH>` — Collection path to add the node to, `:`-delimited for hierarchy (e.g. `docs:rust`). Missing segments are created. Repeatable. Mutually exclusive with --collection-id
+- `--collection-id <ID>` — Collection ID to add the node to (repeatable). Prefer --collection
+- `--remove-collection-id <ID>` — Collection ID to remove the node from (repeatable)
 
 **`nodespace node set-status`** — Set a task node's status (dedicated verb — do not use `update` for this)
 
@@ -415,6 +544,7 @@ Semantic search across the knowledge graph
 - `--filters <FILTERS>` — JSON-encoded array of {field, operator, value} filter objects
 - `--threshold <THRESHOLD>` — Semantic similarity threshold, 0.0-1.0 (0.0 = server default of 0.7)
 - `--limit <LIMIT>` — Maximum number of results to return (0 = server default, currently 20)
+- `--include-content` — Attach each top result's aggregated subtree markdown to the response, so a hit can be answered from directly instead of needing a follow-up `node get`/`node export` per result. Bounded server-side to the top 5 results regardless of `--limit`; off by default so a plain search stays cheap
 
 ### `nodespace query`
 
@@ -443,12 +573,12 @@ Import markdown files into NodeSpace
 
 **`nodespace import dir`** — Import all markdown files from a directory (recurses into sub-folders by default; see --no-recursive)
 
-- `<DIRECTORY>` — Path to the directory containing markdown files (required)
+- `<DIRECTORIES>` — Path(s) to the directory containing markdown files. Pass more than one to import several directories in a single call: each directory is walked and routed relative to its own root, and results are combined into one summary rather than reported per directory (required)
 - `--collection <COLLECTION>` — Collection path to assign all documents to
 - `--use-filename-as-title` — Use filename stems as document titles
 - `--auto-collection-routing` — Route files to collections based on directory structure
 - `--exclude <EXCLUDE_PATTERNS>` — Directory names to exclude (repeatable, e.g. --exclude node_modules)
-- `--include-agent-files` — Include CLAUDE.md / AGENTS.md files (default: excluded). Matched by basename, case-insensitive, at any depth
+- `--include-agent-files` — Include CLAUDE.md / AGENTS.md / DESIGN.md files (default: excluded). Matched by basename, case-insensitive, at any depth
 - `--include-hidden` — Include hidden files and folders — any path component starting with '.', e.g. .git/, .claude/, dotfiles (default: skipped)
 - `--no-recursive` — Import only the top-level directory; do not descend into sub-folders (default: recurses into sub-folders)
 - `--replace` — Refresh already-imported documents in place: replace each existing document's child subtree from the fresh parse, keeping its root node so inbound links survive. Without this, already-imported documents are skipped (a plain re-import never duplicates)
@@ -495,6 +625,10 @@ Inspect and manage node type schema definitions
 - `--params <PARAMS>` — JSON params. For `create`: {"name", "description"?, "fields"?, "relationships"?, "title_template"?, ...} — see CreateSchemaParams. For `update`: {"schema_id", "add_fields"?, "remove_fields"?, "rename_fields"?, "add_relationships"?, "remove_relationships"?, ...} — see UpdateSchemaParams. Mutually exclusive with `--params-file`
 - `--params-file <PARAMS_FILE>` — Path to a file containing the JSON params (alternative to inline `--params`)
 
+**`nodespace schema delete`** — Delete a schema definition by ID
+
+- `<ID>` — Schema ID to delete (node type identifier, e.g. `adr`, `person`) (required)
+
 ### `nodespace relationship`
 
 Manage typed relationship edges between nodes (distinct from mentions)
@@ -518,7 +652,7 @@ Manage PTY agent sessions (launch, attach, list, kill)
 
 **`nodespace session launch`** — Launch a new agent session and stream its output to stdout
 
-- `<AGENT>` — Agent to launch: claude-code, codex, gemini, pi, opencode (required)
+- `<AGENT>` — Agent to launch: claude-code, codex, antigravity, pi, opencode (required)
 - `--prompt <PROMPT>` — Initial prompt passed to the agent at launch time
 - `--cols <COLS>` — Terminal width in columns (defaults to current terminal width)
 - `--rows <ROWS>` — Terminal height in rows (defaults to current terminal height)
@@ -564,5 +698,17 @@ Manage the daemon's registry of local databases (list, create, register, remove,
 ### `nodespace uninstall`
 
 Uninstall NodeSpace: stop daemon, remove binaries and service registration
+
+### `nodespace skill`
+
+Install, remove, or check the NodeSpace skill for detected AI-agent harnesses (Claude Code, Codex, Gemini CLI, OpenCode) -- the CLI-only equivalent of the desktop app's first-launch skill installer
+
+**`nodespace skill install`** — Detect AI-agent harnesses and install the NodeSpace skill into them. Safe to re-run: already-installed harnesses are left alone, and a harness installed since the last run is picked up
+
+- `--yes` — Install without prompting for confirmation. Implied automatically when stdin/stdout isn't a terminal (CI, a script, an agent's non-interactive shell) — mirrors install.sh's `--gui`/`--no-gui` no-TTY default: never hang waiting on a prompt that can't be answered
+
+**`nodespace skill uninstall`** — Remove the NodeSpace skill from detected (or specified) harnesses
+
+**`nodespace skill status`** — Report which harnesses currently have the skill installed
 
 <!-- END GENERATED: cli-surface -->
