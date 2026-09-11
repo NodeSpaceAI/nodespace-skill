@@ -9,7 +9,7 @@ description: >
   behind existing code; when recording a decision or discovery that should
   outlive this session; or when asked to "check nodespace".
 allowed-tools: Bash(nodespace:*)
-compatibility: Targets NodeSpace app v0.2.9. Requires either a shell with the `nodespace` CLI on $PATH, or an MCP client connected to `nodespace mcp` (its bash-less passthrough) -- see Preflight Check in SKILL.md.
+compatibility: Targets NodeSpace app v0.2.10. Requires either a shell with the `nodespace` CLI on $PATH, or an MCP client connected to `nodespace mcp` (its bash-less passthrough) -- see Preflight Check in SKILL.md.
 ---
 
 # NodeSpace Skill
@@ -49,15 +49,7 @@ Date nodes make temporal retrieval reliable: if a finding is time-bound, attach 
 
 ## Shared Workspaces (Multi-User)
 
-A NodeSpace collection can be **synced and shared** with a teammate through NodeSpace Pro: the daemon is launched already bound to it, so another engineer — or their agent — reads and writes the same graph. It is opt-in, private to its members, and syncs only once each engineer has signed in and enabled sync. In a shared workspace:
-
-**Everything you save is visible, and you are not the only writer.** You don't pick the shared collection per write — nodes you create sync into it automatically. Keep private scratch in a separate database (`nodespace database create`/`--database`). A node here may have been created or last edited by your teammate, so don't assume it is yours or stable across your session, and search at session start to pull what they already saved. Don't move sensitive or unrelated notes in without intent.
-
-**Attribute what you save, and prefer additive writes.** Put provenance in the content — who wrote it and when — since a human-readable marker is easier to scan than the per-node creator NodeSpace records. Add a new node rather than rewriting one your teammate authored; when you must update a shared node, pass the `version` you read via `nodespace node batch-update`, so a concurrent edit surfaces as an OCC conflict instead of silently overwriting. (`node update` without a version bypasses that check.)
-
-**Recall is eventually consistent, and semantic search lags further.** A teammate's write appears after sync latency. For immediate cross-engineer recall use structured queries — `nodespace query`, or `nodespace node query --content-contains "..."` — which see a peer's node as soon as it syncs. Semantic `nodespace search` works only after your machine has embedded it: embeddings are generated locally, not synced, so fall back to `nodespace query` for a recent teammate note.
-
-**Don't file shared memory under date nodes.** Attaching findings under `--parent "YYYY-MM-DD"` does **not** round-trip through sync yet — date-container nodes stay local. Save findings as regular nodes (optionally under a shared project or collection node) or your teammate won't see them.
+A NodeSpace collection can be synced and shared with a teammate through NodeSpace Pro: the daemon is launched already bound to it, so another engineer — or their agent — reads and writes the same graph. If that is the case here, read **`references/shared-workspaces.md`** before your first write to a shared collection: it covers write visibility, attribution, sync latency for search/recall, and why date-node findings do not sync yet. Skip it entirely for a private, single-user database.
 
 ## Preflight Check
 
@@ -123,6 +115,10 @@ NodeSpace is not reachable from this surface. There is no command to run and not
 NodeSpace daemon must be running. The `nodespace` CLI communicates with `nodespaced` over a Unix socket. If the daemon is not running, CLI commands will fail with a connection error.
 
 Start the daemon: `nodespaced` (or it starts automatically on login if installed via DMG).
+
+## Graph-Authored Guidance (Fetched)
+
+A user or team can author procedural guidance directly in the graph, fetched at point of use rather than rendered into this file. **Before a nontrivial operation** (a spec/ADR/design, a multi-step import, a schema change), run `nodespace skill guidance "<task>"` (Branch 2: `args: "skill guidance <task>"`) — results are provenance-marked, never silently merged into this document's own text. Read **`references/graph-authored-guidance.md`** before your first call: it covers the trust boundary, the marker format, and why a failed or empty fetch is not a failure of the task.
 
 ## Tool Decision Guide
 
@@ -274,6 +270,18 @@ nodespace node delete <node-id>
 If the user wants something out of the way rather than gone, prefer moving it (re-parent it, or drop it from a collection) over deleting it.
 
 **A node type can be deleted too** — `nodespace schema delete <type>`, once `schema update` has cleared any relationship declarations pointing at or from it. Asked to remove, drop or clean up a type, including a throwaway one you just created, reach for this; never call it unsupported or strip a schema to an empty shell instead. Sequence in `references/cli.md`.
+
+### Resolve a duplicate or colliding record
+
+```bash
+nodespace conflicts list --status open                 # see what's outstanding
+nodespace conflicts show <conflict-id>                  # confirm the participants and evidence
+nodespace conflicts dismiss <conflict-id>                # acceptable as-is — no node changes
+nodespace conflicts adopt <conflict-id> --keep <node-id> # continue with the existing node — no node changes
+nodespace conflicts merge --survivor <node-id> --conflict-id <conflict-id>  # combine into one record
+```
+
+`merge` is the one irreversible-feeling action here — it archives the losing node and re-points its edges immediately when called. Only call it once the user has confirmed which node should survive; `dismiss` and `adopt` don't touch either node. Full options and output shape in `references/cli.md`.
 
 ### Bulk import from markdown
 

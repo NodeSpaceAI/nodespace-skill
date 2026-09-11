@@ -445,6 +445,44 @@ A database is addressed by **name or id**. When a name is ambiguous (shared by m
 
 **Output:** `list` prints a table (or the full list with `--json`); the other commands print the affected database record (`--json` emits the full `DatabaseInfo`).
 
+### Conflicts
+
+Reads and resolves records from the conflict journal — durable evidence that two nodes collide (e.g. two active `person` nodes share a unique-flagged field's value, or two collections share a name). This is a second client onto the same journal the desktop app's Conflicts view reads and writes, so a dismiss/adopt/merge made here is immediately visible there and vice versa.
+
+```bash
+# List conflicts (optionally filtered)
+nodespace conflicts list
+nodespace conflicts list --status open
+nodespace conflicts list --kind unique_field_collision
+nodespace conflicts list --node <node-id>   # conflicts naming this node as a participant
+
+# Show one conflict record in full, including detail and any prior resolution
+nodespace conflicts show <conflict-id>
+
+# Dismiss a conflict as acceptable, without changing either node
+nodespace conflicts dismiss <conflict-id>
+
+# Resolve by continuing with an existing node instead of a new one (non-destructive)
+nodespace conflicts adopt <conflict-id> --keep <node-id>
+
+# Merge a losing node into a surviving node: unions properties, re-points edges, archives the loser
+nodespace conflicts merge --survivor <node-id> --loser <node-id>
+nodespace conflicts merge --survivor <node-id> --conflict-id <conflict-id>   # loser inferred from the record
+```
+
+**Options:**
+- `list [--status open|resolved|dismissed] [--kind unique_field_collision|collection_name_collision] [--node <id>] [--limit <n>]` — `--node` lists only conflicts naming that node as a participant and, when set, ignores `--status`/`--kind`/`--limit`
+- `show <conflict-id>` — full record, including `detail` (kind-specific evidence) and `resolution` (once resolved or dismissed)
+- `dismiss <conflict-id>` — acknowledges the conflict; re-detection will not reopen it
+- `adopt <conflict-id> --keep <node-id>` — resolves without deleting or modifying either node
+- `merge --survivor <node-id> [--loser <node-id>] [--conflict-id <conflict-id>]` — `--loser` is required unless `--conflict-id` names an open record with exactly one other participant besides `--survivor`, in which case the loser is inferred
+
+**Which action for which kind:** `dismiss` and `adopt` apply to any kind. `merge` makes sense for `unique_field_collision` (two node records for the same real thing) but not `collection_name_collision` (renaming one collection, via `nodespace node update`, is the fix there — then dismiss or let the record self-resolve).
+
+**Merge is the one irreversible-feeling action here** — it archives the loser node and re-points its edges immediately when called, and is never performed automatically at any confidence level. Only call it once the user has explicitly confirmed which node should survive; use `show` or `nodespace node get` first to confirm the identity of both participants. `dismiss` and `adopt` are comparatively low-stakes: neither node is changed.
+
+**Output:** a `ConflictRecord` — `id`, `kind`, `node_ids` (sorted participants), `detail` (kind-specific evidence, e.g. `{"node_type":"person","field":"email","value":"...","case_insensitive":true}`), `status` (`open`/`resolved`/`dismissed`), `detected_at`, `occurrences`, `resolved_at`/`resolution` once settled (e.g. `{"action":"dismiss"}`, `{"action":"adopt_existing","adopted":"<id>"}`, `{"action":"merge","survivor":"<id>","loser":"<id>",...}`). `merge` additionally prints `properties_merged`/`edges_repointed`/`edges_dropped`.
+
 ### Complete command surface
 
 <!-- BEGIN GENERATED: cli-surface (see packages/cli/src/lib.rs (clap derive), packages/cli/examples/gen_skill_md.rs) -->
@@ -646,6 +684,36 @@ Manage typed relationship edges between nodes (distinct from mentions)
 - `--type <RELATIONSHIP_NAME>` — Relationship name (as defined on the node's schema) (required)
 - `--direction <DIRECTION>` — Direction to traverse
 
+### `nodespace conflicts`
+
+Inspect and resolve the local conflict journal (list, show, dismiss, adopt, merge)
+
+**`nodespace conflicts list`** — List conflict records, optionally filtered by status, kind, or participant node
+
+- `--status <STATUS>` — Filter by status: open | resolved | dismissed. Omit for every status
+- `--kind <KIND>` — Filter by kind: unique_field_collision | collection_name_collision
+- `--node <NODE>` — List only conflicts naming this node id as a participant
+- `--limit <LIMIT>` — Cap the number of records returned. Ignored when `--node` is set
+
+**`nodespace conflicts show`** — Show a single conflict record by its own id, including detail and any prior resolution
+
+- `<CONFLICT_ID>` — Conflict record id (required)
+
+**`nodespace conflicts dismiss`** — Dismiss a conflict as acceptable — acknowledges it without changing any node
+
+- `<CONFLICT_ID>` — Conflict record id (required)
+
+**`nodespace conflicts adopt`** — Resolve a conflict by continuing with an existing node instead of the new one (non-destructive)
+
+- `<CONFLICT_ID>` — Conflict record id (required)
+- `--keep <KEEP>` — The node id to keep — the counterparty is resolved without navigating to it (required)
+
+**`nodespace conflicts merge`** — Merge a losing node into a surviving node: unions properties, re-points edges, archives the loser
+
+- `--survivor <SURVIVOR>` — Surviving node id — receives the union of properties and every re-pointed edge (required)
+- `--loser <LOSER>` — Losing node id, archived after the merge. Required unless `--conflict-id` names a two-participant record, in which case the other participant is used
+- `--conflict-id <CONFLICT_ID>` — The open conflict record this merge resolves, closed as resolved in the same transaction
+
 ### `nodespace session`
 
 Manage PTY agent sessions (launch, attach, list, kill)
@@ -710,5 +778,30 @@ Install, remove, or check the NodeSpace skill for detected AI-agent harnesses (C
 **`nodespace skill uninstall`** — Remove the NodeSpace skill from detected (or specified) harnesses
 
 **`nodespace skill status`** — Report which harnesses currently have the skill installed
+
+**`nodespace skill guidance`** — Fetch procedural guidance from the graph's seeded `skill` nodes — the fetch half of the fetch-at-activation model SKILL.md's body instructs an activated agent to use. Output is always provenance- marked (a banner in human mode, a `"provenance": "graph-fetched"` envelope in `--json` mode) so fetched content is never indistinguishable from the skill's own static instructions
+
+- `<QUERY>` — Free-text description of the task at hand (e.g. "write an ADR and save it"). Matched semantically against seeded skill guidance so results are scoped to what's relevant right now rather than the whole registry. Pass an empty string (the default) to list every seeded skill's guidance
+- `--limit <LIMIT>` — Maximum number of guidance entries to return, capped at 5 regardless of a higher value. A guidance entry's whole value is its fetched markdown content, and the server never attaches markdown past the 5th result (matching `search --include-content`'s own cap) -- so unlike a plain node search, where a markdown-less result still carries a useful title/snippet, requesting more than 5 here would only return empty-content entries dressed in a full provenance banner. The cap is applied to the request itself, not just the markdown-attachment count, so that can't happen
+
+**`nodespace skill reset`** — Discard a user's customization of a seeded skill node's config (description/tool_whitelist/max_iterations) and/or guidance (procedural markdown), restoring it to the currently-compiled template. The one path in NodeSpace allowed to override a `_seed.config_modified` / `_seed.guidance_modified` durability guard (ADR-072) — reconciliation on daemon startup never discards a user-modified aspect on its own. Requires confirmation unless `--yes` is passed
+
+- `<KEY>` — The seed key to reset — a seeded skill's exact title (e.g. "Research & Search"), matching what `nodespace skill guidance` fetches under. Case-sensitive, no normalization (required)
+- `--guidance` — Reset the procedural guidance (markdown children) to the currently- compiled template, discarding any customization
+- `--config` — Reset the config (description/tool_whitelist/max_iterations) to the currently-compiled template, discarding any customization
+- `--all` — Reset both guidance and config — equivalent to passing both flags
+- `--yes` — Reset without prompting for confirmation. Required in a non-interactive context (no `--yes` there is a hard error, not an auto-proceed) — unlike `install`/`mcp enable`, this is the one destructive path in the system (ADR-072), and auto-confirming a content discard with no one watching would defeat the point of requiring confirmation at all
+
+### `nodespace mcp`
+
+Host a stdio MCP server exposing one passthrough tool, for bash-less MCP surfaces (e.g. Claude Desktop's Chat tab) that cannot shell this CLI directly — see `commands::mcp` for the architecture and its ADR-038 trust-boundary controls. Disabled until `nodespace mcp install` explicitly turns it on. With no subcommand, hosts the stdio server itself — what a client config launches, not something a person types directly
+
+**`nodespace mcp install`** — Configure a detected bash-less MCP client (currently Claude Desktop) to launch `nodespace mcp`, and enable the passthrough tool. Safe to re-run
+
+- `--yes` — Install without prompting for confirmation. Implied automatically when stdin/stdout isn't a terminal — mirrors `nodespace skill install`'s `--yes`
+
+**`nodespace mcp uninstall`** — Remove the MCP config this wrote from every detected client and disable the passthrough tool again
+
+**`nodespace mcp status`** — Report whether the passthrough tool is enabled and which clients currently have a config pointing at it
 
 <!-- END GENERATED: cli-surface -->
