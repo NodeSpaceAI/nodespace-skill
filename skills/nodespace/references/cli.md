@@ -304,6 +304,30 @@ Reverse names are for *traversal*, not for `relationship create`: an edge is alw
 
 Both node IDs must already exist — search for missing IDs first (`nodespace search` / `nodespace node query`). Apart from the built-in names below, the relationship name must be defined on the source node's schema; define it there (`nodespace schema create`/`update`) if it isn't yet. `relationship create` on a node whose schema doesn't define that relationship name fails with an error naming the undefined relationship.
 
+### Play automation rule-sets
+
+A Play (`trigger → conditions → actions`) is a `node_type: "play"` node, so its lifecycle is managed with generic verbs — no bespoke enable/disable/list/logs commands exist:
+
+```bash
+nodespace query --type play                                                  # list installed Plays
+nodespace query --type playbook_log --filters '[{"type":"property","operator":"equals","property":"play_id","value":"<play-id>"}]'  # execution-error history for one Play
+nodespace node update <play-id> --lifecycle-status archived                  # disable a Play
+nodespace node update <play-id> --lifecycle-status active                    # re-enable a disabled Play
+```
+
+`get-workflow-state` is the one purpose-built verb — it runs the engine's condition evaluation out of band from a live trigger, which a generic verb cannot do:
+
+```bash
+nodespace playbook get-workflow-state <node-id>
+```
+
+Evaluates every active Play rule whose trigger could apply to the node's type against its current state, and reports each condition's state:
+- **satisfied** — the condition evaluated true right now.
+- **not_yet_met** — the condition references a real, schema-declared field or relationship that simply doesn't have a value yet. Normal; the Play stays active waiting for it.
+- **unresolvable** — the condition references something that is neither a declared field nor a declared relationship on the node's schema at all. Almost certainly a typo in how the Play was authored — no future graph state will make it resolve, so report it plainly rather than telling the user to wait.
+
+Scoped to this device only: whether a rule has already fired is not tracked anywhere in the system, so this reports live condition state, never an execution history.
+
 <!-- BEGIN GENERATED: builtin-relationships (see packages/core/src/models/schema.rs (BUILTIN_RELATIONSHIP_NAMES), packages/cli/examples/gen_skill_md.rs) -->
 **Built-in relationship names.** Four names are structural and legal between any two nodes without being declared on a schema: `member_of`, `has_child`, `mentions`, `has_role`. They have hardcoded semantics — hierarchy, mentions, collection membership, and roles — and their own UI affordances.
 
@@ -347,7 +371,19 @@ If `create` reports the schema already exists, stop and tell the user — they c
 
 If `create` rejects the schema with a validation error (not "already exists") — for example a `title_template` placeholder missing from `fields`, or an invalid field type — the error names the specific problem. Fix exactly that and retry immediately with the corrected payload; don't ask the user to clarify and don't give up after one rejection.
 
-**Editing:** to add, remove, or rename a field, or change a relationship on an existing schema, use `schema update` with only the fields that need changing (`add_fields`/`remove_fields`/`rename_fields`, or an updated `description`/`title_template`). Don't re-create the whole schema for a small change.
+**Editing:** to add, remove, or rename a field, add a value to an existing enum field, or change a relationship on an existing schema, use `schema update` with only the fields that need changing (`add_fields`/`remove_fields`/`rename_fields`/`add_field_values`, or an updated `description`/`title_template`). Don't re-create the whole schema for a small change.
+
+**Adding a value to an existing enum.** To give a field that already exists a new choice — a `backlog` status on `task`, another priority level — use `add_field_values`, not `add_fields`:
+
+```bash
+nodespace schema update --params '{"schema_id":"task","add_field_values":[{"field":"status","values":[{"value":"backlog","label":"Backlog"}]}]}'
+```
+
+`add_fields` is the wrong tool here: it declares a *new* field and leaves the original one's vocabulary untouched. Redeclaring the existing field with a fuller `coreValues` list is rejected outright, so extending in place is the only route.
+
+Only a field declared `extensible: true` **and** typed `enum` can be extended — `nodespace schema get <schema_id>` shows both, so check before calling rather than discovering it through a rejection. Added values land in `user_values`; `core_values` is never written.
+
+The operation is all-or-nothing: it is rejected if the field doesn't exist, isn't extensible, isn't an enum, or if any value string already exists on `core_values` or `user_values` — nothing is merged or overwritten. Collision is checked on the `value` string and never on `label` (two values may legitimately share a label), so a rejection naming a colliding value means pick a different `value`, not a different `label`.
 
 **Rename vs. relabel:** `rename_fields` can rename a field's storage key or relabel its display name only — see the tool schema for the `from`/`to`/`friendlyName` shape of each. A user asking to relabel what a field is called on screen almost always means the display label, not a storage rename.
 
@@ -491,7 +527,7 @@ Every command, subcommand, and flag below is generated from the CLI's own defini
 **Global flags** (accepted on every command):
 
 - `--json` — Emit raw JSON instead of human-readable output
-- `--socket <SOCKET>` — Override the socket path. With no flag and no environment variable, the CLI dials ~/.nodespace/daemon.sock, or auto-discovers a running dev/Pro daemon's socket if that one is absent. Honors the `NODESPACED_SOCKET` environment variable when this flag is absent (env: `NODESPACED_SOCKET`)
+- `--socket <SOCKET>` — Override the socket path (macOS/Linux) or Named Pipe name (Windows). With no flag and no environment variable: on macOS/Linux the CLI dials ~/.nodespace/daemon.sock, or auto-discovers a running dev/Pro daemon's socket if that one is absent; on Windows it dials the fixed `\\.\pipe\nodespace-daemon` pipe. Honors the `NODESPACED_SOCKET` environment variable when this flag is absent (env: `NODESPACED_SOCKET`)
 - `--database <DATABASE>` — Target a specific local database by name or id (ADR-053). When omitted, requests route to the daemon's default database. Honors the `NODESPACE_DATABASE` environment variable when this flag is absent (env: `NODESPACE_DATABASE`)
 
 ### `nodespace node`
@@ -522,7 +558,7 @@ Operate on individual nodes (get, create, update, delete, children, query, expor
 **`nodespace node set-status`** — Set a task node's status (dedicated verb — do not use `update` for this)
 
 - `<ID>` — Task node ID (required)
-- `<STATUS>` — New status. Must be one of: open, in_progress, done, cancelled (required)
+- `<STATUS>` — New status. Must be one of the values the `task` schema's `status` field declares — the four built-ins (open, in_progress, done, cancelled) plus any added since. An invalid value is rejected with the current list (required)
 
 **`nodespace node delete`** — Delete a node
 
@@ -595,7 +631,7 @@ Structured property query with comparison operators (equals/contains/gt/lt/gte/l
 
 ### `nodespace diagnostics`
 
-Developer diagnostics: database path, size, node counts, schema count
+Developer diagnostics: database path, size, node counts, schema count, daemon process memory
 
 ### `nodespace import`
 
@@ -655,17 +691,39 @@ Inspect and manage node type schema definitions
 
 **`nodespace schema create`** — Create a new schema from a JSON params blob
 
-- `--params <PARAMS>` — JSON params. For `create`: {"name", "description"?, "fields"?, "relationships"?, "title_template"?, ...} — see CreateSchemaParams. For `update`: {"schema_id", "add_fields"?, "remove_fields"?, "rename_fields"?, "add_relationships"?, "remove_relationships"?, ...} — see UpdateSchemaParams. Mutually exclusive with `--params-file`
+- `--params <PARAMS>` — JSON params. For `create`: {"name", "description"?, "fields"?, "relationships"?, "title_template"?, ...} — see CreateSchemaParams. For `update`: {"schema_id", "add_fields"?, "remove_fields"?, "rename_fields"?, "add_field_values"?, "add_relationships"?, "remove_relationships"?, ...} — see UpdateSchemaParams. Mutually exclusive with `--params-file`
 - `--params-file <PARAMS_FILE>` — Path to a file containing the JSON params (alternative to inline `--params`)
 
 **`nodespace schema update`** — Update an existing schema from a JSON params blob
 
-- `--params <PARAMS>` — JSON params. For `create`: {"name", "description"?, "fields"?, "relationships"?, "title_template"?, ...} — see CreateSchemaParams. For `update`: {"schema_id", "add_fields"?, "remove_fields"?, "rename_fields"?, "add_relationships"?, "remove_relationships"?, ...} — see UpdateSchemaParams. Mutually exclusive with `--params-file`
+- `--params <PARAMS>` — JSON params. For `create`: {"name", "description"?, "fields"?, "relationships"?, "title_template"?, ...} — see CreateSchemaParams. For `update`: {"schema_id", "add_fields"?, "remove_fields"?, "rename_fields"?, "add_field_values"?, "add_relationships"?, "remove_relationships"?, ...} — see UpdateSchemaParams. Mutually exclusive with `--params-file`
 - `--params-file <PARAMS_FILE>` — Path to a file containing the JSON params (alternative to inline `--params`)
 
 **`nodespace schema delete`** — Delete a schema definition by ID
 
 - `<ID>` — Schema ID to delete (node type identifier, e.g. `adr`, `person`) (required)
+
+### `nodespace playbook`
+
+Inspect and control Play automation rule-sets (list, logs, enable, disable, get-workflow-state)
+
+**`nodespace playbook list`** — List all installed Plays and their lifecycle status
+
+**`nodespace playbook logs`** — Show execution-error history for a Play (log nodes it produced)
+
+- `<PLAY_ID>` — Play ID to show log entries for (required)
+
+**`nodespace playbook enable`** — Re-enable a disabled Play after fixing the underlying issue
+
+- `<PLAY_ID>` — Play ID (node ID of the `play` node) (required)
+
+**`nodespace playbook disable`** — Manually disable a Play
+
+- `<PLAY_ID>` — Play ID (node ID of the `play` node) (required)
+
+**`nodespace playbook get-workflow-state`** — Evaluate a node against every active Play rule that could apply to its type, and report which conditions are satisfied, not yet met, or unresolvable (a likely typo in a condition's path)
+
+- `<NODE_ID>` — ID of the node to evaluate active Play rules against (required)
 
 ### `nodespace relationship`
 

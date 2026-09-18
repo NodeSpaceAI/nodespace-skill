@@ -9,7 +9,7 @@ description: >
   behind existing code; when recording a decision or discovery that should
   outlive this session; or when asked to "check nodespace".
 allowed-tools: Bash(nodespace:*)
-compatibility: Targets NodeSpace app v0.2.10. Requires either a shell with the `nodespace` CLI on $PATH, or an MCP client connected to `nodespace mcp` (its bash-less passthrough) -- see Preflight Check in SKILL.md.
+compatibility: Targets NodeSpace app v0.3.0. Requires either a shell with the `nodespace` CLI on $PATH, or an MCP client connected to `nodespace mcp` (its bash-less passthrough) -- see Preflight Check in SKILL.md.
 ---
 
 # NodeSpace Skill
@@ -28,7 +28,7 @@ It persists across sessions — what you save today is searchable tomorrow, and 
 
 **Built-in node types:**
 - `text` — freeform notes, documents, findings, summaries
-- `task` — structured to-do items; carry `status` (`open`/`in_progress`/`done`/`cancelled`), `due_date` (YYYY-MM-DD), and `priority` (`low`/`medium`/`high`)
+- `task` — structured to-do items; carry `status` (`open`/`in_progress`/`done`/`cancelled`), `due_date` (YYYY-MM-DD), and `priority` (`highest`/`high`/`medium`/`low`/`lowest`)
 - `date` — daily container nodes (e.g. "2026-05-30"); each day has one. Attach time-sensitive findings under the relevant date node so they're retrievable by day.
 
 **Hierarchy is first-class edges, not nesting.** A node has one parent edge. Children are ordered via fractional ordering — siblings have a stable position without gap-numbering. Moving or reordering a node is an edge operation (change the parent or sibling position), not a recreate-and-delete.
@@ -282,6 +282,10 @@ nodespace conflicts merge --survivor <node-id> --conflict-id <conflict-id>  # co
 ```
 
 `merge` is the one irreversible-feeling action here — it archives the losing node and re-points its edges immediately when called. Only call it once the user has confirmed which node should survive; `dismiss` and `adopt` don't touch either node. Full options and output shape in `references/cli.md`.
+
+### Inspect or control a Play automation rule-set
+
+A Play is a node, managed with `query`/`node update`; see `references/cli.md`.
 
 ### Bulk import from markdown
 
