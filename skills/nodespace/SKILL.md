@@ -9,7 +9,7 @@ description: >
   behind existing code; when recording a decision or discovery that should
   outlive this session; or when asked to "check nodespace".
 allowed-tools: Bash(nodespace:*)
-compatibility: Targets NodeSpace app v0.3.0. Requires either a shell with the `nodespace` CLI on $PATH, or an MCP client connected to `nodespace mcp` (its bash-less passthrough) -- see Preflight Check in SKILL.md.
+compatibility: Targets NodeSpace app v0.3.1. Requires either a shell with the `nodespace` CLI on $PATH, or an MCP client connected to `nodespace mcp` (its bash-less passthrough) -- see Preflight Check in SKILL.md.
 ---
 
 # NodeSpace Skill
@@ -128,7 +128,8 @@ Use this to pick the right command for the task at hand.
 
 | Goal | Command |
 |------|---------|
-| Find nodes by keywords or meaning | `nodespace search "<query>"` |
+| Find a specific record you know by name (a task, a company, any typed record) | `nodespace node query --title-contains "<name>"` |
+| Find documents and records by topic | `nodespace search "<query>"` |
 | List all nodes of a type | `nodespace search "" --type <type>` |
 | Filter by property values (status, due_date, priority, etc.) | `nodespace query --type <type> --filters '<json>'` |
 | Filter with comparison operators (gt, lt, gte, lte, in) | `nodespace query --type <type> --filters '<json>'` |
@@ -137,15 +138,11 @@ Use this to pick the right command for the task at hand.
 
 **`nodespace node query` is for exact substring/type matching only** (`--content-contains`, `--title-contains`, `--mentioned-by`, `--type`). It has no property-filter flags.
 
-**`nodespace query` is the command for structured property queries** — status, due_date, priority, or any comparison operator. Examples:
-- "find all my open tasks" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"status","value":"open"}]'`
-- "tasks due tomorrow" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"due_date","value":"<YYYY-MM-DD>"}]' --sorting '[{"field":"due_date","direction":"asc"}]'`
-- "tasks due this week" → `nodespace query --type task --filters '[{"type":"property","operator":"gte","property":"due_date","value":"<week start>"},{"type":"property","operator":"lte","property":"due_date","value":"<week end>"}]'`
-- "high priority tasks" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"priority","value":"high"}]'`
+**`nodespace query` is the command for structured property queries** — status, due_date, priority, or any comparison operator. Worked examples: `references/cli.md`, *Structured property query*.
 
-Date format for all date properties: **YYYY-MM-DD**. Available operators: `equals`, `contains`, `gt`, `lt`, `gte`, `lte`, `in`, `exists`. Filter types: `property`, `content`, `relationship`, `metadata`.
+**A name is not an ID — resolve it before you act.** When the user names a record you haven't looked up ("mark the Northwind contract signed", "add Fabrikam"), run `nodespace node query --title-contains "<name>"` first. Search also returns near-misses by meaning, so it can't tell you the record is absent. Judge the results by whether one *is* the named record — same name, same type — not by whether the list is empty, since the lookup also matches on a shared word. One match: act on its ID; if asked to *add* it, say it already exists and ask before creating a duplicate. Several: ask which one. None: it doesn't exist — create it if they're adding it, otherwise tell them. Don't keep searching.
 
-**`nodespace search` is semantic** (embedding-based similarity), ranked by relevance. Pass `--type` to narrow to one or more node types, `--limit` to cap results (default 20), `--include-content` to also read the top 5 hits (a bare result is just its heading). No graph-boost, cross-collection exclusion, or edge-inclusion — fall back to `nodespace query` plus `nodespace relationship get` for those.
+**`nodespace search` finds documents and records** by meaning and title keywords, ranked by relevance — never a line from inside one. Pass `--type` to narrow to one or more node types, `--limit` to cap results (default 20), `--include-content` to also read the top 5 hits (a bare result is just its heading). No graph-boost, cross-collection exclusion, or edge-inclusion — fall back to `nodespace query` plus `nodespace relationship get` for those.
 
 **Multiple topics:** run `nodespace search` once per topic rather than one broad search plus per-result fetches.
 
@@ -228,7 +225,7 @@ nodespace node get "2026-05-30"
 ### Define a new entity type, then create an instance
 
 ```bash
-# 1. Create the schema (one schema per request; `references/cli.md` covers field/enum/relationship shape)
+# 1. Create the schema (only the types asked for; a linked pair is two calls, target first — see `references/cli.md`)
 nodespace schema create --params '{"name":"Ticket","fields":[{"name":"status","type":"text"}]}'
 
 # 2. Create an instance
@@ -256,14 +253,14 @@ nodespace node create --type text --content "Retry budget" --collection docs:rus
 nodespace node update <node-id> --collection docs:rust
 ```
 
-A collection costs the same one flag as a single `tags` array element, so prefer it for any durable grouping: don't add a `tags`/`categories`/`topics`/`labels` field to a schema for something collections already model. Unlike an array value, a collection shows in the UI, is renamed once not per member, nests, and needs no schema change to join — `member_of` is structural, legal between any two nodes undeclared.
+Prefer a collection for any durable grouping: don't add a `tags`/`categories`/`topics`/`labels` field for something collections already model. Unlike an array value, a collection shows in the UI, is renamed once not per member, nests, and needs no schema change to join — `member_of` is structural, legal between any two nodes undeclared.
 
 ### Delete a node, or a whole node type
 
 Deletion is permanent and takes the node's children with it. Resolve the node first and confirm with the user before deleting anything you did not just create — a wrong id here is not recoverable.
 
 ```bash
-nodespace node query --content-contains "draft spec"   # resolve the id first
+nodespace node query --title-contains "draft spec"     # resolve the id first
 nodespace node delete <node-id>
 ```
 
@@ -283,9 +280,10 @@ nodespace conflicts merge --survivor <node-id> --conflict-id <conflict-id>  # co
 
 `merge` is the one irreversible-feeling action here — it archives the losing node and re-points its edges immediately when called. Only call it once the user has confirmed which node should survive; `dismiss` and `adopt` don't touch either node. Full options and output shape in `references/cli.md`.
 
-### Inspect or control a Play automation rule-set
+### Plays and work-tracking setups
 
 A Play is a node, managed with `query`/`node update`; see `references/cli.md`.
+For Linear-style work tracking, follow `references/linear-playbook.md`.
 
 ### Bulk import from markdown
 

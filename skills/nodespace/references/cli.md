@@ -110,7 +110,7 @@ nodespace node update <node-id> --property status=in_progress --property priorit
 
 At least one of `--content` or `--property` is required.
 
-**Find then update:** if you don't already have the node's ID, run `nodespace search` or `nodespace node query` first to locate it, then update by ID. If the search comes back with zero matches or several equally plausible matches, ask the user one specific clarifying question rather than retrying — e.g. "I found 3 tickets in review — which one did you mean: the auth one, the CI one, or the audit-log one?"
+**Find then update:** if you don't already have the node's ID, locate it first — by name with `nodespace node query --title-contains "<name>"` (an exact match; `nodespace search` also finds names but mixes in documents that are only similar in meaning), or by topic with `nodespace search` — then update by ID. If the lookup comes back with zero matches or several equally plausible matches, ask the user one specific clarifying question rather than retrying — e.g. "I found 3 tickets in review — which one did you mean: the auth one, the CI one, or the audit-log one?"
 
 **Do NOT use `node update --property status=...` for task status changes** — use `nodespace node set-status` instead (below); it validates against the allowed status values before writing.
 
@@ -132,7 +132,7 @@ Dedicated verb for task status transitions. Status must be one of: `open`, `in_p
 nodespace node delete <node-id>
 ```
 
-**Find then delete:** locate the node via `nodespace search` or `nodespace node query` if you don't have its ID, and confirm the title matches what the user described before deleting. Delete one node per call; confirm each deletion before moving to the next. Don't search again afterward to verify the deletion — the delete response confirms it.
+**Find then delete:** locate the node via `nodespace node query --title-contains` (or `nodespace search` for notes and documents) if you don't have its ID, and confirm the title matches what the user described before deleting. Delete one node per call; confirm each deletion before moving to the next. Don't search again afterward to verify the deletion — the delete response confirms it.
 
 **Output:** Confirmation JSON
 
@@ -178,7 +178,15 @@ nodespace query --type task --filters '[{"type":"property","operator":"gte","pro
 - `--sorting <json>` — array of `{"field":"...","direction":"asc"|"desc"}`
 - `--limit <n>` — max results (0 = server default of 50; server caps at 500 regardless of the value passed)
 
-See the Tool Decision Guide above for worked examples. This is the CLI counterpart of the property-filtering path of the local agent's `search_nodes` tool.
+Worked examples:
+- "find all my open tasks" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"status","value":"open"}]'`
+- "tasks due tomorrow" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"due_date","value":"<YYYY-MM-DD>"}]' --sorting '[{"field":"due_date","direction":"asc"}]'`
+- "tasks due this week" → `nodespace query --type task --filters '[{"type":"property","operator":"gte","property":"due_date","value":"<week start>"},{"type":"property","operator":"lte","property":"due_date","value":"<week end>"}]'`
+- "high priority tasks" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"priority","value":"high"}]'`
+
+Date format for all date properties: **YYYY-MM-DD**.
+
+This is the CLI counterpart of the property-filtering path of the local agent's `search_nodes` tool.
 
 **Output:** JSON array of matching nodes
 
@@ -230,6 +238,8 @@ nodespace search "" --type task    # list all nodes of a type (empty query)
 - `--filters <json>` — array of `{field, operator, value}` filter objects
 - `--threshold <0.0-1.0>` — similarity cutoff (0.0 = server default of 0.7); lower it (e.g. 0.1-0.2) for broader recall when results are sparse
 - `--limit <n>` — max results (default: 20)
+
+Matches on meaning and on title keywords, so tasks, date pages and typed records are found by name. Results are whole documents and records, never a line from inside one.
 
 **Output:** JSON array of matching nodes
 
@@ -285,6 +295,7 @@ nodespace relationship get <node-id> --type billed_to --direction in
 # (adr declares: name decided_by, targetType person, reverseName decisions, reverseCardinality many)
 nodespace relationship get <person-id> --type decisions
 nodespace relationship get <person-id> --type decided_by --direction in   # equivalent
+nodespace relationship get <person-id> --type decisions --direction in    # also equivalent — see below
 ```
 
 **Options (`create`):**
@@ -296,23 +307,37 @@ nodespace relationship get <person-id> --type decided_by --direction in   # equi
 **Options (`get`):**
 - `<id>` — node ID to query relationships for
 - `--type <name>` — relationship name to traverse: the forward `name` from the source's end, or the declared `reverseName` from the target's end
-- `--direction <out|in>` — traversal direction (default: `out`), relative to the name given
+- `--direction <out|in>` — traversal direction (default: `out`), relative to the name given. **Ignored when `--type` is a `reverseName`** (or a built-in's fixed inverse, e.g. `child_of`) — see below
 
 **Traversing the reverse direction.** A relationship is declared once, on the source type, but reads from both ends. Given `{"name":"decided_by","targetType":"person","direction":"out","cardinality":"one","reverseName":"decisions","reverseCardinality":"many"}` on `adr`: from the ADR, `nodespace relationship get <adr-id> --type decided_by --direction out`; from the person, use the declared `reverseName` — `nodespace relationship get <person-id> --type decisions` — or the equivalent `--type decided_by --direction in`. Both spellings return the same ADRs, and the output line's arrow shows the direction actually traversed (`<--decided_by--` for an inbound resolution). An empty result means no edges exist, not that reverse traversal is unsupported. A name declared in neither direction is rejected with an error naming the spellings that do work — read it and retry rather than concluding the capability is missing.
 
+A `reverseName` (or a built-in's fixed inverse, like `child_of`) names exactly one traversal — the forward relationship, read from the target end — so `--direction` has nothing to select once `--type` already resolved to one: `--type decisions --direction in` runs the identical query as `--type decisions` with no flag at all, not a second, further-reversed one. Pairing `--direction` with the forward name is where direction still does something (`--type decided_by --direction in` vs. `--direction out`, from the person and the ADR respectively).
+
 Reverse names are for *traversal*, not for `relationship create`: an edge is always created under its forward name, from the source node. They are also not usable in `node query --filters`, whose `relationship` filters cover only the structural graph (`parent`, `children`, `mentions`, `mentioned_by`) — use `relationship get` to traverse a schema-declared name.
 
-Both node IDs must already exist — search for missing IDs first (`nodespace search` / `nodespace node query`). Apart from the built-in names below, the relationship name must be defined on the source node's schema; define it there (`nodespace schema create`/`update`) if it isn't yet. `relationship create` on a node whose schema doesn't define that relationship name fails with an error naming the undefined relationship.
+Both node IDs must already exist — look up missing IDs first (`nodespace node query --title-contains` by name; `nodespace search` for notes and documents). Apart from the built-in names below, the relationship name must be defined on the source node's schema; define it there (`nodespace schema create`/`update`) if it isn't yet. `relationship create` on a node whose schema doesn't define that relationship name fails with an error naming the undefined relationship.
 
 ### Play automation rule-sets
 
-A Play (`trigger → conditions → actions`) is a `node_type: "play"` node, so its lifecycle is managed with generic verbs — no bespoke enable/disable/list/logs commands exist:
+A Play (`trigger → conditions → actions`) is a `node_type: "play"` node, so its lifecycle is managed with generic verbs — no bespoke enable/disable/list commands exist:
 
 ```bash
 nodespace query --type play                                                  # list installed Plays
-nodespace query --type playbook_log --filters '[{"type":"property","operator":"equals","property":"play_id","value":"<play-id>"}]'  # execution-error history for one Play
 nodespace node update <play-id> --lifecycle-status archived                  # disable a Play
 nodespace node update <play-id> --lifecycle-status active                    # re-enable a disabled Play
+```
+
+A Play's execution errors are **not** in the graph. Engine diagnostics (a failed
+action, a cycle-limit breach, a rule that would not compile) are operational
+telemetry rather than knowledge, so they go to the daemon log rather than
+becoming nodes — there is nothing to query for them. Read them with
+`nodespace logs`, which resolves the log path for you (it differs between a
+desktop-app install and a Homebrew service):
+
+```bash
+nodespace logs --filter <play-id>
+nodespace logs --filter <play-id> --lines 200
+nodespace logs --path-only                    # just print where the log lives
 ```
 
 `get-workflow-state` is the one purpose-built verb — it runs the engine's condition evaluation out of band from a live trigger, which a generic verb cannot do:
@@ -351,8 +376,8 @@ nodespace schema get person
 # Create a new schema
 nodespace schema create --params '{"name":"Ticket","description":"A tracked unit of engineering work","fields":[{"name":"status","type":"enum","required":true,"coreValues":[{"value":"ready_for_dev","label":"Ready for Dev"},{"value":"in_dev","label":"In Dev"},{"value":"done","label":"Done"}]},{"name":"assignee","type":"text"}],"relationships":[{"name":"belongs_to_sprint","targetType":"sprint","direction":"out","cardinality":"one","reverseName":"tickets","reverseCardinality":"many"}]}'
 
-# Create a schema with a unique field — key flagged unique_case_insensitive
-nodespace schema create --params '{"name":"ADR","description":"An architecture decision record","fields":[{"name":"key","type":"text","required":true,"unique_case_insensitive":true},{"name":"status","type":"enum","required":true,"coreValues":[{"value":"proposed","label":"Proposed"},{"value":"accepted","label":"Accepted"},{"value":"superseded","label":"Superseded"}]}]}'
+# Create a schema with a unique field — key flagged uniqueCaseInsensitive
+nodespace schema create --params '{"name":"ADR","description":"An architecture decision record","fields":[{"name":"key","type":"text","required":true,"uniqueCaseInsensitive":true},{"name":"status","type":"enum","required":true,"coreValues":[{"value":"proposed","label":"Proposed"},{"value":"accepted","label":"Accepted"},{"value":"superseded","label":"Superseded"}]}]}'
 
 # Update an existing schema — add/remove/rename fields, without re-creating it
 nodespace schema update --params '{"schema_id":"ticket","add_fields":[{"name":"sprint","type":"text"}]}'
@@ -365,7 +390,9 @@ nodespace schema delete adr
 `create`/`update` take a single JSON `--params` blob (or `--params-file <path>` for a file) rather than per-field flags — the params shape mirrors `CreateSchemaParams`/`UpdateSchemaParams` in the daemon.
 
 <!-- BEGIN GENERATED: schema-rules (see packages/agent/src/skill_rules.rs, packages/cli/examples/gen_skill_md.rs) -->
-**One schema per request.** Create exactly the type asked for, in a single `schema create` call, then stop and report it. Don't proactively create related types the user didn't ask for (e.g. asked for "ADR" — don't also create "Ticket" or "Sprint"), and don't follow up with `schema update` to wire relationships unless explicitly asked. A relationship's `targetType` must already exist (check `nodespace schema list`) or be the type this call is creating; if it is neither, omit the relationship rather than creating the other type as a side effect.
+**Only the types asked for.** Create exactly the types asked for — no more — then stop and report them. Don't proactively create related types the user didn't ask for (e.g. asked for "ADR" — don't also create "Ticket" or "Sprint"), and don't follow up with `schema update` to wire relationships unless explicitly asked. This is a rule about restraint, not about call count: when the user does ask for several types, create all of them — see *Creating two linked types* for the order.
+
+**Creating two linked types.** When the user asks for a pair (e.g. "Customer and Invoice, linked"), that is two `schema create` calls, not one. A relationship's `targetType` must already exist, or be the type the same call is creating — pointing at a type you only intend to create next is rejected. So create the target type first, then the referencing type, declaring the relationship on the *referencing* side: create `Customer`, then create `Invoice` with `{"name":"billed_to","targetType":"customer","direction":"out","cardinality":"one","reverseName":"invoices","reverseCardinality":"many"}`. The required `reverseName` gives the Customer end its `invoices` accessor for free — one stored edge, readable from both ends, no `schema update` follow-up. Declaring `invoices → invoice` on `Customer` first is rejected: the target doesn't exist yet. Don't omit the relationship here — the user asked for the types to be linked, and omitting it silently delivers two unlinked types.
 
 If `create` reports the schema already exists, stop and tell the user — they can create instances with `node create` against the existing type.
 
@@ -404,13 +431,15 @@ This is the mirror of the `targetType` rule above: a relationship's target must 
 
 Two scoping notes. Only declarations *between schemas* block the delete — relationship edges between ordinary nodes are instance data and are not counted, so there is no need to unpick those first. And deleting the type does not delete its instances: they remain as nodes of that type, so remove them with `node delete` separately if the user wants them gone too.
 
+**Exception for `extends`:** it is never cleared through `remove_relationships` — that call is rejected outright, since the only way to change an `extends` edge is the dedicated `extends` field on `schema update` (re-targeting it, never clearing it). So the sequence above does not apply to `extends` itself: a schema that extends a parent needs no prerequisite step — deleting it deletes its own `extends` declaration right along with it. A schema OTHER schemas still extend stays blocked with the same `schema_has_declarations` rejection until those children are deleted, or re-targeted onto a different parent: `nodespace schema update --params '{"schema_id":"<child>","extends":"<new-parent>"}'`.
+
 **Schema fields:** define only type-specific fields — don't add a `name` or `title` field; every node already has a built-in content/title field. Exception: if `title_template` uses a `{name}` placeholder, `name` must be defined as a field (any placeholder in `title_template` must have a matching field).
 
 **Field source:** derive every field from what the user's own request describes wanting to track — never from another schema shown in the entity-types context. That listing exists so you don't recreate a type that already exists; it is not a shape to copy fields from for a new, unrelated type.
 
 **Enums:** lowercase values with readable labels — `{"value":"in_progress","label":"In Progress"}`.
 
-**Relationships vs. fields:** use a relationship (not a field) when a value references another node type. `targetType` must be an existing schema ID, or the schema ID of the type being created in the same call. `reverseName` and `reverseCardinality` are **required** on every relationship — a declaration missing either is rejected. One edge is stored and read from both ends, so name it from both: `reverseName` is what the edge is called read from the target (plural where that end may hold many — `invoices`, not `Invoice (Customer)`), and `reverseCardinality` is `one` or `many`, saying how many sources may point at one target. Examples: `{"name":"supersedes","targetType":"adr","direction":"out","cardinality":"one","reverseName":"superseded_by","reverseCardinality":"one"}`, `{"name":"has_task","targetType":"task","direction":"out","cardinality":"many","reverseName":"ticket","reverseCardinality":"one"}`, `{"name":"decided_by","targetType":"person","direction":"out","cardinality":"one","reverseName":"decisions","reverseCardinality":"many"}`.
+**Relationships vs. fields:** use a relationship (not a field) when a value references another node type. `targetType` must be an existing schema ID, or the schema ID of the type being created in the same call. If it doesn't exist yet and the user asked for both types, create the target type first and declare the relationship on the type created second (see *Creating two linked types*); omit the relationship only when the target is a type the user never asked for. `reverseName` and `reverseCardinality` are **required** on every relationship — a declaration missing either is rejected. One edge is stored and read from both ends, so name it from both: `reverseName` is what the edge is called read from the target (plural where that end may hold many — `invoices`, not `Invoice (Customer)`), and `reverseCardinality` is `one` or `many`, saying how many sources may point at one target. Examples: `{"name":"supersedes","targetType":"adr","direction":"out","cardinality":"one","reverseName":"superseded_by","reverseCardinality":"one"}`, `{"name":"has_task","targetType":"task","direction":"out","cardinality":"many","reverseName":"ticket","reverseCardinality":"one"}`, `{"name":"decided_by","targetType":"person","direction":"out","cardinality":"one","reverseName":"decisions","reverseCardinality":"many"}`.
 
 **Self-referential relationships:** a type may point at itself in the same `schema create` call — give its own schema ID (the snake_case form of the name); no follow-up `schema update` is needed. The required `reverseName` is what names the other direction, so never declare a second relationship for it — one stored edge, readable from both ends: `{"name":"supersedes","targetType":"adr","direction":"out","cardinality":"one","reverseName":"superseded_by","reverseCardinality":"one"}`. The same shape covers `blocks`/`blocked_by` on a task and `parent`/`child` on a category.
 
@@ -429,9 +458,14 @@ Two scoping notes. Only declarations *between schemas* block the delete — rela
 
 Two limits worth knowing. Only relationships you declare can carry `edgeFields`: the built-in structural names (`member_of`, `has_child`, `mentions`, `has_role`) are reserved and rejected as declarations, so an edge field cannot be attached to them. And `required`/`default` on an edge field are recorded but not enforced at write time — an omitted enum key is stored absent rather than filled in from `default`, so don't rely on a default to supply a value.
 
-**Title template:** set `title_template` when a node's identity comes from its fields rather than free-form content, using `{field_name}` placeholders — every placeholder must be a defined field. Omit it if the content/title field alone identifies the node.
+**Title template:** `content` is a node's name for entity types (`Customer`, `Person`, `Invoice`) — for a node created without a parent, NodeSpace surfaces it as the title automatically. Only markdown primitives (`text`, `header`, `quote-block`, `code-block`, etc.) use `content` as a prose body instead of a name. Three cases:
+- **Single-field identity** — e.g. `Customer`: one field's value is the whole title. Put it directly in `content`; don't set `title_template`, and don't add a separate field (e.g. `company_name`) that duplicates it.
+- **Composed identity** — e.g. `Person` (`first_name` + `last_name`): no single field holds the full title, so assemble one with `title_template: "{first_name} {last_name}"`, using `{field_name}` placeholders — every placeholder must be a defined field.
+- **Markdown primitive** — `text`, `header`, etc.: `content` is prose, not a name; `title_template` doesn't apply.
 
-**Unique fields:** set `"unique": true` on a field when the user's request implies each instance should have a distinct value for it (e.g. "each ticket should have a unique key" → flag `key` unique). Use `"unique_case_insensitive": true` instead when case shouldn't matter — email and username are the common case. This is advisory only: it does not prevent duplicates from being created, it only lets the system surface a likely existing match when a new value collides. Never describe it to the user as blocking or rejecting duplicates — it's a suggestion, not an enforced constraint. Example: `{"name":"key","type":"text","unique_case_insensitive":true}`.
+Use `title_template` only to assemble a title from two or more fields. If one field already holds the whole identity, that value belongs in `content` alone.
+
+**Unique fields:** set `"unique": true` on a field when the user's request implies each instance should have a distinct value for it (e.g. "each ticket should have a unique key" → flag `key` unique). Use `"uniqueCaseInsensitive": true` instead when case shouldn't matter — email and username are the common case. This is advisory only: it does not prevent duplicates from being created, it only lets the system surface a likely existing match when a new value collides. Never describe it to the user as blocking or rejecting duplicates — it's a suggestion, not an enforced constraint. Example: `{"name":"key","type":"text","uniqueCaseInsensitive":true}`.
 <!-- END GENERATED: schema-rules -->
 
 A `description` field is fine when it adds value beyond the title. Field names are alphanumeric-and-underscore only — the CLAUDE.md-documented `custom:` namespace prefix convention applies to natural-language schema authoring in the local agent, not to explicit `fields` arrays passed here; don't prefix field names when calling `schema create`/`update` directly.
@@ -543,6 +577,7 @@ Operate on individual nodes (get, create, update, delete, children, query, expor
 - `--type <NODE_TYPE>` — Node type, e.g. `text`, `task`, `date` (required)
 - `--content <CONTENT>` — Content (plain text or markdown) (required)
 - `--parent <PARENT>` — Parent node ID (omit to create a root node)
+- `--property <PROPERTIES>` — Set one or more properties: `--property key=value` (repeatable). Values are parsed as JSON when possible (numbers, booleans, `null`, arrays, objects), otherwise treated as a plain string. Required this way for any schema field that is `required` with no default — validation runs at create time, so there is no way to supply it afterward via `update`
 - `--collection <PATH>` — Collection path to file the node under, `:`-delimited for hierarchy (e.g. `docs:rust`) — the same syntax `import` and `search` take. Missing segments are created. Repeatable to join several collections in one call. Mutually exclusive with --collection-id
 - `--collection-id <ID>` — Collection ID to file the node under (repeatable). Prefer --collection, which takes a readable path and needs no lookup
 
@@ -633,6 +668,14 @@ Structured property query with comparison operators (equals/contains/gt/lt/gte/l
 
 Developer diagnostics: database path, size, node counts, schema count, daemon process memory
 
+### `nodespace logs`
+
+Read the daemon's log — where Play execution errors go
+
+- `--filter <FILTER>` — Show only lines containing this text — a play id, a rule name, an error type. Matched literally, not as a regex
+- `--lines <LINES>` — How many matching lines to show, most recent last
+- `--path-only` — Print the resolved log file path and exit without reading it
+
 ### `nodespace import`
 
 Import markdown files into NodeSpace
@@ -708,10 +751,6 @@ Inspect and manage node type schema definitions
 Inspect and control Play automation rule-sets (list, logs, enable, disable, get-workflow-state)
 
 **`nodespace playbook list`** — List all installed Plays and their lifecycle status
-
-**`nodespace playbook logs`** — Show execution-error history for a Play (log nodes it produced)
-
-- `<PLAY_ID>` — Play ID to show log entries for (required)
 
 **`nodespace playbook enable`** — Re-enable a disabled Play after fixing the underlying issue
 
