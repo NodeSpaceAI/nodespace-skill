@@ -122,19 +122,22 @@ At least one of `--content` or `--property` is required.
 nodespace node set-status <task-id> in_progress
 ```
 
-Dedicated verb for task status transitions. Status must be one of: `open`, `in_progress`, `done`, `cancelled` — invalid values are rejected before the update is sent.
+Dedicated verb for task status transitions. Status must be one of the values the `task` schema's `status` field declares — the four built-ins (`open`, `in_progress`, `done`, `cancelled`) plus any added via `schema update`'s `add_field_values` (see "Adding a value to an existing enum" under Schema inspection and management). Validated against that live vocabulary; an invalid value is rejected with the current list.
 
 **Output:** Updated node JSON.
 
 ### Delete a node
 
 ```bash
-nodespace node delete <node-id>
+nodespace node delete <node-id>                                  # step 1: preview, deletes nothing
+nodespace node delete <node-id> --version <v> --descendants <n>  # step 2: delete exactly what was previewed
 ```
 
-**Find then delete:** locate the node via `nodespace node query --title-contains` (or `nodespace search` for notes and documents) if you don't have its ID, and confirm the title matches what the user described before deleting. Delete one node per call; confirm each deletion before moving to the next. Don't search again afterward to verify the deletion — the delete response confirms it.
+**Two steps, always:** the bare form only previews — it names the node (title, type, version) and how many nested nodes go with it, and prints the step-2 command as `confirm_command`. Show the user the preview, and run `confirm_command` unchanged only after they say yes. Step 2 is refused, deleting nothing, if the node was edited or anything was added or removed beneath it since the preview; preview again and re-confirm rather than adjusting the numbers yourself.
 
-**Output:** Confirmation JSON
+**Find then delete:** locate the node via `nodespace node query --title-contains` (or `nodespace search` for notes and documents) if you don't have its ID. Delete one node per call; confirm each deletion before moving to the next. Don't search again afterward to verify the deletion — the delete response confirms it.
+
+**Output:** Step 1 — `{"node_id", "existed", "deleted": false, "title", "node_type", "version", "descendant_count", "confirm_command"}`. Step 2 — `{"node_id", "existed", "deleted_count"}`, where `deleted_count` includes the node itself.
 
 ### List children
 
@@ -351,6 +354,8 @@ Evaluates every active Play rule whose trigger could apply to the node's type ag
 - **not_yet_met** — the condition references a real, schema-declared field or relationship that simply doesn't have a value yet. Normal; the Play stays active waiting for it.
 - **unresolvable** — the condition references something that is neither a declared field nor a declared relationship on the node's schema at all. Almost certainly a typo in how the Play was authored — no future graph state will make it resolve, so report it plainly rather than telling the user to wait.
 
+A non-empty `degraded_reasons` in the output means a schema lookup failed while the result was built: it may be missing rules and may report a real field or relationship as **unresolvable**. Re-run once; if `degraded_reasons` is still non-empty, report the result as incomplete rather than calling any condition a typo.
+
 Scoped to this device only: whether a rule has already fired is not tracked anywhere in the system, so this reports live condition state, never an execution history.
 
 <!-- BEGIN GENERATED: builtin-relationships (see packages/core/src/models/schema.rs (BUILTIN_RELATIONSHIP_NAMES), packages/cli/examples/gen_skill_md.rs) -->
@@ -414,7 +419,7 @@ The operation is all-or-nothing: it is rejected if the field doesn't exist, isn'
 
 **Rename vs. relabel:** `rename_fields` can rename a field's storage key or relabel its display name only — see the tool schema for the `from`/`to`/`friendlyName` shape of each. A user asking to relabel what a field is called on screen almost always means the display label, not a storage rename.
 
-**Deleting a schema.** A node type can be removed — `nodespace schema delete <schema_id>`. Reach for it whenever the user asks to remove, drop, undo or clean up a type, including a throwaway type created earlier in the session; never report deletion as unsupported, and never propose stripping a schema to an empty shell as a substitute.
+**Deleting a schema.** A node type can be removed — `nodespace schema delete <schema_id>`. Reach for it whenever the user asks to remove, drop, undo or clean up a type, including a throwaway type created earlier in the session; never report deletion as unsupported, and never propose stripping a schema to an empty shell as a substitute. Core types (`task`, `text`, `date`, `person`, …) are the exception: they cannot be deleted, and the attempt is rejected with `schema_is_core`.
 
 Relationship declarations are the one prerequisite: a schema that still declares relationships, or is still targeted by another type's declaration, is rejected with `schema_has_declarations` and the remaining count. Clear them with `schema update` first, then delete:
 
@@ -429,9 +434,37 @@ nodespace schema delete adr
 
 This is the mirror of the `targetType` rule above: a relationship's target must **exist** before the relationship can be declared, and must be **absent** before the type it points at can be deleted.
 
+`schema get` on a type that `extends` another lists the relationships it inherits alongside its own. `remove_relationships` only removes the type's **own** declarations: naming an inherited one is rejected with the ancestor that declares it, and naming one the type doesn't have is rejected with the list of names it does declare. An inherited relationship doesn't block deleting the child, so step 1 for a child type covers only the names it declares itself.
+
 Two scoping notes. Only declarations *between schemas* block the delete — relationship edges between ordinary nodes are instance data and are not counted, so there is no need to unpick those first. And deleting the type does not delete its instances: they remain as nodes of that type, so remove them with `node delete` separately if the user wants them gone too.
 
 **Exception for `extends`:** it is never cleared through `remove_relationships` — that call is rejected outright, since the only way to change an `extends` edge is the dedicated `extends` field on `schema update` (re-targeting it, never clearing it). So the sequence above does not apply to `extends` itself: a schema that extends a parent needs no prerequisite step — deleting it deletes its own `extends` declaration right along with it. A schema OTHER schemas still extend stays blocked with the same `schema_has_declarations` rejection until those children are deleted, or re-targeted onto a different parent: `nodespace schema update --params '{"schema_id":"<child>","extends":"<new-parent>"}'`.
+
+**Specializing an existing type: `extends`.** When a new type IS a more specific version of one that already exists ("an Issue type that's a Task with a severity field"), reach for `extends` rather than hand-copying the base type's fields into a new, unrelated schema — a hand-copied list loses real subtype identity, automatic inheritance of the base type's future changes, and compatibility with Plays/queries already written against the base type.
+
+`extends` is a **first-class key in the schema definition**, taking the parent's schema id — never a hand-written entry in `relationships`:
+
+```json
+{"name": "Issue", "extends": "task", "fields": [{"name": "severity", "type": "enum", "coreValues": [{"value": "low", "label": "Low"}, {"value": "high", "label": "High"}]}]}
+```
+
+This is the single most important thing to get right: every other relationship is declared with `direction`/`cardinality`/`reverseName` inside `relationships`, so it's tempting to infer `extends` follows the same shape — `{"relationships": [{"name": "extends", "targetType": "task", ...}]}` is exactly that inference, and `create`/`update` reject it outright. `schema update` takes the same top-level `extends` key to set or re-point a parent after creation; there is no way to clear one once set, only re-target it.
+
+Composition is **additive only**: the extending schema cannot redeclare a field its parent already has, even with a different enum vocabulary — that's a hard rejection, not a merge. And **single parent only** — a schema extends at most one other schema.
+
+An instance of the extending schema gets that schema's own id as its real `node_type` — creating an `issue` produces `node_type: "issue"`, never `"task"`. This is the mechanism's whole point: the base type does not persist as the created node's type.
+
+**Querying is scope-projected, not flat.** A query for `node_type: "task"` returns `task` rows *and* every extending instance, but each result is projected to `task`'s own field set — an `issue` in those results carries `status` but not `severity`. To see a subtype's own fields, query that subtype directly (`node_type: "issue"`). Querying the base type and then looking for an extension field on the result finds nothing; it isn't a bug, it's the wrong scope.
+
+**Giving an inherited enum field a richer vocabulary** uses `add_field_values` exactly as usual, with one addition: every newly appended value must carry `mapsTo`, naming which pre-existing value it collapses to at the parent's scope.
+
+```bash
+nodespace schema update --params '{"schema_id":"issue","add_field_values":[{"field":"status","values":[{"value":"backlog","label":"Backlog","mapsTo":"todo"}]}]}'
+```
+
+Never declare a new, differently-named field (`issue_status`) for this — that isn't an extension of `status` at all, and it's exactly what `mapsTo` exists to make unnecessary: a base-scoped Play or query watching `task.status` keeps matching an `issue` node's `backlog` value as `todo`, unmodified.
+
+**Namespace exception:** fields declared directly on the extending schema's own `fields` list are stored bare — no `custom:`/`org:`/`plugin:` prefix required, unlike the usual rule for extending a type you don't own. They live in their own bucket and never collide with the parent's fields.
 
 **Schema fields:** define only type-specific fields — don't add a `name` or `title` field; every node already has a built-in content/title field. Exception: if `title_template` uses a `{name}` placeholder, `name` must be defined as a field (any placeholder in `title_template` must have a matching field).
 
@@ -575,7 +608,7 @@ Operate on individual nodes (get, create, update, delete, children, query, expor
 **`nodespace node create`** — Create a new node
 
 - `--type <NODE_TYPE>` — Node type, e.g. `text`, `task`, `date` (required)
-- `--content <CONTENT>` — Content (plain text or markdown) (required)
+- `--content <CONTENT>` — Content (plain text or markdown). Omit for a type with a title template (e.g. `person`): its name comes from the template's fields, set with `--property`, and content is rejected
 - `--parent <PARENT>` — Parent node ID (omit to create a root node)
 - `--property <PROPERTIES>` — Set one or more properties: `--property key=value` (repeatable). Values are parsed as JSON when possible (numbers, booleans, `null`, arrays, objects), otherwise treated as a plain string. Required this way for any schema field that is `required` with no default — validation runs at create time, so there is no way to supply it afterward via `update`
 - `--collection <PATH>` — Collection path to file the node under, `:`-delimited for hierarchy (e.g. `docs:rust`) — the same syntax `import` and `search` take. Missing segments are created. Repeatable to join several collections in one call. Mutually exclusive with --collection-id
@@ -595,9 +628,11 @@ Operate on individual nodes (get, create, update, delete, children, query, expor
 - `<ID>` — Task node ID (required)
 - `<STATUS>` — New status. Must be one of the values the `task` schema's `status` field declares — the four built-ins (open, in_progress, done, cancelled) plus any added since. An invalid value is rejected with the current list (required)
 
-**`nodespace node delete`** — Delete a node
+**`nodespace node delete`** — Delete a node and everything nested under it, in two steps: without `--version`/`--descendants` it only previews what would be removed and prints the exact command that deletes it
 
 - `<ID>` — Node ID to delete (required)
+- `--version <VERSION>` — The node version its preview showed. Deletes only if it still matches
+- `--descendants <DESCENDANTS>` — The nested-node count its preview showed. Deletes only if it still matches
 
 **`nodespace node children`** — List the direct children of a node
 
@@ -634,7 +669,7 @@ Manage the local inference model (list, load, recommended)
 
 **`nodespace model list`** — List models in the catalog and their download/load status
 
-**`nodespace model load`** — Load a model (downloading first if needed); streams progress to stdout
+**`nodespace model load`** — Load a model (downloading first if needed); streams progress to stdout (with `--json`, prints a single document once the model is ready)
 
 - `<MODEL_ID>` — Model id to load, e.g. `gemma-4-e4b-q4km`. Omit to use the recommended model
 
@@ -866,7 +901,7 @@ Uninstall NodeSpace: stop daemon, remove binaries and service registration
 
 ### `nodespace skill`
 
-Install, remove, or check the NodeSpace skill for detected AI-agent harnesses (Claude Code, Codex, Gemini CLI, OpenCode) -- the CLI-only equivalent of the desktop app's first-launch skill installer
+Install, remove, or check the NodeSpace skill for detected AI-agent harnesses (Claude Code, Codex, Antigravity CLI, OpenCode, Pi) -- the CLI-only equivalent of the desktop app's first-launch skill installer
 
 **`nodespace skill install`** — Detect AI-agent harnesses and install the NodeSpace skill into them. Safe to re-run: already-installed harnesses are left alone, and a harness installed since the last run is picked up
 
@@ -881,11 +916,11 @@ Install, remove, or check the NodeSpace skill for detected AI-agent harnesses (C
 - `<QUERY>` — Free-text description of the task at hand (e.g. "write an ADR and save it"). Matched semantically against seeded skill guidance so results are scoped to what's relevant right now rather than the whole registry. Pass an empty string (the default) to list every seeded skill's guidance
 - `--limit <LIMIT>` — Maximum number of guidance entries to return, capped at 5 regardless of a higher value. A guidance entry's whole value is its fetched markdown content, and the server never attaches markdown past the 5th result (matching `search --include-content`'s own cap) -- so unlike a plain node search, where a markdown-less result still carries a useful title/snippet, requesting more than 5 here would only return empty-content entries dressed in a full provenance banner. The cap is applied to the request itself, not just the markdown-attachment count, so that can't happen
 
-**`nodespace skill reset`** — Discard a user's customization of a seeded skill node's config (description/tool_whitelist/max_iterations) and/or guidance (procedural markdown), restoring it to the currently-compiled template. The one path in NodeSpace allowed to override a `_seed.config_modified` / `_seed.guidance_modified` durability guard (ADR-072) — reconciliation on daemon startup never discards a user-modified aspect on its own. Requires confirmation unless `--yes` is passed
+**`nodespace skill reset`** — Discard a user's customization of a seeded skill node's config (description/exclusion/tool_whitelist/max_iterations) and/or guidance (procedural markdown), restoring it to the currently-compiled template. The one path in NodeSpace allowed to override a `_seed.config_modified` / `_seed.guidance_modified` durability guard (ADR-072) — reconciliation on daemon startup never discards a user-modified aspect on its own. Requires confirmation unless `--yes` is passed
 
 - `<KEY>` — The seed key to reset — a seeded skill's exact title (e.g. "Research & Search"), matching what `nodespace skill guidance` fetches under. Case-sensitive, no normalization (required)
 - `--guidance` — Reset the procedural guidance (markdown children) to the currently- compiled template, discarding any customization
-- `--config` — Reset the config (description/tool_whitelist/max_iterations) to the currently-compiled template, discarding any customization
+- `--config` — Reset the config (description/exclusion/tool_whitelist/max_iterations) to the currently-compiled template, discarding any customization
 - `--all` — Reset both guidance and config — equivalent to passing both flags
 - `--yes` — Reset without prompting for confirmation. Required in a non-interactive context (no `--yes` there is a hard error, not an auto-proceed) — unlike `install`/`mcp enable`, this is the one destructive path in the system (ADR-072), and auto-confirming a content discard with no one watching would defeat the point of requiring confirmation at all
 
