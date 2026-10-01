@@ -353,8 +353,9 @@ Evaluates every active Play rule whose trigger could apply to the node's type ag
 - **satisfied** — the condition evaluated true right now.
 - **not_yet_met** — the condition references a real, schema-declared field or relationship that simply doesn't have a value yet. Normal; the Play stays active waiting for it.
 - **unresolvable** — the condition references something that is neither a declared field nor a declared relationship on the node's schema at all. Almost certainly a typo in how the Play was authored — no future graph state will make it resolve, so report it plainly rather than telling the user to wait.
+- **unknown** — a lookup the condition depends on failed while it was evaluated (its `reason` says which), so whether it holds is not known. Not a typo and not a wait: re-run, and report it as unevaluated if it persists.
 
-A non-empty `degraded_reasons` in the output means a schema lookup failed while the result was built: it may be missing rules and may report a real field or relationship as **unresolvable**. Re-run once; if `degraded_reasons` is still non-empty, report the result as incomplete rather than calling any condition a typo.
+A non-empty `degraded_reasons` in the output means a schema or graph lookup failed while the result was built: it may be missing rules, may report a real field or relationship as **unresolvable**, and names each condition it reported as **unknown**. Re-run once; if `degraded_reasons` is still non-empty, report the result as incomplete rather than calling any condition a typo.
 
 Scoped to this device only: whether a rule has already fired is not tracked anywhere in the system, so this reports live condition state, never an execution history.
 
@@ -546,7 +547,9 @@ nodespace database remove work
 
 A database is addressed by **name or id**. When a name is ambiguous (shared by more than one database), select by id instead — `database list --json` shows each id.
 
-**Output:** `list` prints a table (or the full list with `--json`); the other commands print the affected database record (`--json` emits the full `DatabaseInfo`).
+**Output:** `list` prints a table (or the full list with `--json`); the other commands print the affected database record (`--json` emits the full `DatabaseInfo`). A database's status is `open`, `closed`, `missing` (its file is gone) or `requires_extension`.
+
+**Refused databases.** A database can list an extension this NodeSpace build doesn't support. The daemon then refuses to open it and changes nothing in its file. `database list` shows its status as `requires_extension` and appends what it needs after the path; with `--json` the entry carries `unsupported_extensions` and a `refusal` message (`null` for any other database). Any command routed to such a database, without `--database` when it is the default or with `--database` naming it, exits non-zero with that refusal message and a `Download …` line. Relay the message to the user verbatim, with the download line; the `refusal` field is the message alone, so when relaying from a listing, say the download link comes with the error of any command run against that database. Do not retry, and never move, rename, copy or edit the file to get around it. To keep working, target another database with `--database`. Ask the user before `database use`: it changes the default for every client, the desktop app included.
 
 ### Conflicts
 
@@ -594,7 +597,7 @@ Every command, subcommand, and flag below is generated from the CLI's own defini
 **Global flags** (accepted on every command):
 
 - `--json` — Emit raw JSON instead of human-readable output
-- `--socket <SOCKET>` — Override the socket path (macOS/Linux) or Named Pipe name (Windows). With no flag and no environment variable: on macOS/Linux the CLI dials ~/.nodespace/daemon.sock, or auto-discovers a running dev/Pro daemon's socket if that one is absent; on Windows it dials the fixed `\\.\pipe\nodespace-daemon` pipe. Honors the `NODESPACED_SOCKET` environment variable when this flag is absent (env: `NODESPACED_SOCKET`)
+- `--socket <SOCKET>` — Override the socket path (macOS/Linux) or Named Pipe name (Windows). With no flag and no environment variable: on macOS/Linux the CLI dials ~/.nodespace/daemon.sock, or auto-discovers a running dev daemon's socket if that one is absent; on Windows it dials the fixed `\\.\pipe\nodespace-daemon` pipe. Honors the `NODESPACED_SOCKET` environment variable when this flag is absent (env: `NODESPACED_SOCKET`)
 - `--database <DATABASE>` — Target a specific local database by name or id (ADR-053). When omitted, requests route to the daemon's default database. Honors the `NODESPACE_DATABASE` environment variable when this flag is absent (env: `NODESPACE_DATABASE`)
 
 ### `nodespace node`
