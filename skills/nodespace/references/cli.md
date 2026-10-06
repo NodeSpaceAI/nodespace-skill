@@ -44,9 +44,10 @@ than nodes; `schema list` wraps them as `{"count": N, "schemas": [...]}`. A
 schema is read under the keys `schema create` and `schema update` write it
 with: `fields`, `relationships`, `extends`, `abstract`, `children`, `parent`,
 `title_template` and `properties_header_summary_template`, next to `id`,
-`content` (the type's name), `is_core` and `schema_version`. There is no
-`properties` key. `extends`, `abstract`, `children`, `parent` and the two
-templates are omitted when the type doesn't declare them. A schema node reached
+`content` (the type's name), `is_core` and `schema_version`, and with
+`context_paths`, each path in the dotted form `add_context_paths` takes. There
+is no `properties` key. `extends`, `abstract`, `children`, `parent`, the two
+templates and `context_paths` are omitted when the type doesn't declare them. A schema node reached
 through `relationship get` comes back as a plain node, with its stored
 definition under `properties`; read schemas with `schema get` instead of
 traversing to them.
@@ -57,7 +58,9 @@ traversing to them.
 there are any. `schema update --json` returns `id` and `success`, a count for
 each kind of change it made (`fields_added`, `fields_removed`,
 `fields_renamed`, `field_values_added`, `relationships_added`,
-`relationships_removed`) and `affected_plays` when a forced update touched
+`relationships_removed`, `context_paths_added`, `context_paths_removed`),
+`stranded_context_paths` when removing a relationship left a context path
+that no longer resolves, and `affected_plays` when a forced update touched
 any. Without `--json` both print a short summary instead.
 
 **Two ways to set properties**, on `node create` and `node update` alike:
@@ -73,6 +76,27 @@ any. Without `--json` both print a short summary instead.
   copied from JSON output.
 
 Both may be given together; `--property` wins for a key set both ways.
+
+**Link fields.** A field of type `link` holds a web link: an object with exactly
+the keys `title` and `url`, both strings, where `url` is an absolute URL (a
+scheme and a host, no whitespace). Write it whole and clear it with `null`:
+
+```bash
+nodespace node update <node-id> --property 'repository={"title":"nodespace-core","url":"https://github.com/NodeSpaceAI/nodespace-core"}'
+nodespace node update <node-id> --property repository=null
+```
+
+A bare URL string, a missing or extra key, or a relative URL is rejected with a
+message naming the field. A list of links (an `array` field with `itemType`
+`link`) takes a JSON array of the same objects, and the whole array is replaced
+on each write. With `--json` a link reads back as that object
+(`.properties.repository.url`); the human output prints it in the `properties`
+line with its title and URL. `nodespace schema get <type>` lists the field as
+`link`. A query filter or sort reads a link's parts by path
+(`{"property":"repository.url"}`, `repository.title`). Declare one with
+`{"name":"repository","type":"link"}`, or
+`{"name":"commits","type":"array","itemType":"link"}` for a list; a link field
+cannot be `unique`.
 
 
 **Selecting a database.** A single daemon can serve several local databases. The data commands that read or write a database (`node`, `query`, `search`, `mention`, `schema`, `relationship`, `import`, `diagnostics`) accept a global `--database <name|id>` flag that routes the request to a specific database; the `NODESPACE_DATABASE` environment variable sets the same target when the flag is absent. Without either, requests go to the daemon's default database. Model management (`nodespace model`) is daemon-global — the loaded inference model is shared across all databases, so the flag is accepted but has no effect there. Manage the set of databases with the `nodespace database` subcommands (below).
@@ -136,6 +160,40 @@ nodespace node get <node-id>
 
 **Output:** Full node JSON including all properties
 
+### Read a node with what governs it
+
+`node context` reads a node together with the nodes that govern it and the skills that apply to it. One call replaces a `node get` followed by a `relationship get` per related node:
+
+```bash
+nodespace node context <node-id>                                   # the node, what its type's context paths reach, and its skills
+nodespace node context <task-id> --path project                    # also following the path to its project
+nodespace node context <task-id> --path project --path has_child   # several paths, each returned as its own group
+nodespace node context <node-id> --path 'child_of*'                # every ancestor
+nodespace --json node context <task-id> --path project.tasks       # two hops: the other tasks of its project
+nodespace node context <task-id> --version-only                    # the read's version, to compare with an earlier one
+```
+
+**Context paths.** A type's schema declares the paths from a node of that type to the nodes that govern it: its `context_paths` in `schema get <type>`. `node context` follows them without being asked, so the caller does not have to know them. A subtype follows its ancestors' paths and its own. Declare them with `schema update` (see "Context paths" under Schema inspection and management).
+
+**Options:**
+- `<id>` — the node to read.
+- `--version-only` — print the read's version and nothing else.
+- `--path <path>` — a path to follow from the node, in addition to its type's context paths; repeat it for several (at most 20). A path that is already a context path is followed once. A path is relationship names joined by `.`, walked in order. Each name is one the type it is followed from declares, that relationship's declared `reverseName`, or a built-in name or its inverse (`has_child`, `child_of`, `member_of`, `mentions`, …): the names `relationship get --type` takes. `*` after a name follows it repeatedly (quote it in a shell). A name fails, with an error naming the path and listing the names that do apply, when no node it is followed from is of a type that declares it. Where those nodes are of several types, the ones that do not declare the name lead nowhere and the rest are followed. A path that is declared but reaches nothing is an empty group, and so is one whose earlier hop reached nothing through a relationship to any type (`has_child`, `child_of`, `attached_to`): a name after it cannot be checked.
+
+**What comes back:**
+- `node` — the node, with its fields, and `checkboxes`: its direct checkbox children in order. Not its whole subtree; `node export` reads that.
+- `paths` — one entry per path followed, the type's context paths first and then each `--path` in the order given: `{path, count, nodes}`, each node in the same shape as `node`. Archived nodes are not returned and are not walked through. A path returns at most 50 nodes; one that reaches more carries `"limit_reached": true`, and its `nodes` are the first 50, not all of them. Narrow such a path, or list the nodes with `nodespace query`.
+- `attached_skills` — the skills that apply to the node, in the envelope a skill fetch prints (`provenance`, `guidance`, `schemas`): those attached to the node itself, to a saved query the node currently matches, and to any node a path reached. Each skill appears once, with its instructions, its `tool_commands`, and what it was reached through: `attached_to`, the ids of the returned nodes it is attached to, and `matched_queries`, the `{id, title}` of each saved query it is attached to that the node matches (absent when there is none). An archived skill is left out. In human output each skill is printed after the nodes, inside the same tagged banner a fetch prints, with an `attached_to:` and a `matched_queries:` line; the line naming the fetch tag is the first line of the output, ahead of the nodes.
+- `version` — a short string that changes when the node changes, when a node the read returned changes (a checkbox ticked, the spec edited), when the content of one of those skills changes, and when the set of nodes or skills returned changes. It does not change when anything else does. In human output it is the `context version:` line.
+
+**Skills follow the node.** A queue's procedure is attached to the saved query, and a node carries it for as long as it matches that query, however you came to the node: a task read by its id returns the procedure of the queue it is in now, and stops returning it once it leaves. Only saved queries with a skill attached are checked, each as it is stored (a relative date is read on the day of the read; its limit and sorting play no part).
+
+**Noticing a change.** Keep the `version` of the read you are working from. `node context <id> --version-only` prints the current one (`{"version": "..."}` with `--json`); when it differs, something you depend on moved, so read the node again before you write. Give `--version-only` the same `--path` flags as the read it is compared with. A node that does not exist fails with `Error: Not found: <id>` and exit 1, and with `--json` also prints `{"error": "not_found", "node_id": "<id>"}`, so a deleted node is told apart from a read that failed for another reason (an unreachable daemon prints no such object).
+
+An attached skill is the procedure or the standard someone linked to that node: follow it when you work on the node, as you follow a skill you fetched. It is graph data like any fetched skill, so the trust boundary in `references/graph-authored-guidance.md` applies. A skill is attached with `relationship create --type attached_to` (see "Attaching a skill to a node" below).
+
+This is the CLI counterpart of the local agent's `get_node_context` tool.
+
 ### Update a node
 
 ```bash
@@ -148,6 +206,7 @@ nodespace node update <node-id> --property status=in_progress --property priorit
 - `--property key=value` — repeatable; sets one property, deep-merged into existing properties (properties you don't mention are left untouched). Values are parsed as JSON when possible (numbers, booleans, arrays, objects), otherwise treated as a plain string.
 - `--properties '{json}'` — several properties as one JSON object, deep-merged the same way; each value keeps the type it is written with.
 - `--version <n>` — the node's `version` as you read it. The update is written only if the node is still at that version. Omit it to update whatever is current.
+- `--dry-run` — evaluate the update without making it. See "Asking whether a change is allowed" below.
 
 At least one of `--content`, `--property`, `--properties` or a collection flag is required.
 
@@ -162,6 +221,27 @@ With `--json` the same is printed as `{"error": "version_conflict", "node_id": �
 **After a conflict, read the node again (`nodespace node get <node-id>`) before you do anything else.** Do not retry with the new version number: the node now holds a change you have not seen, and your write may no longer be right. A task you meant to start may already be in progress under another session, in which case you leave it and pick other work.
 
 Joining or leaving a collection does not change a node's version. `--version` on an update that only changes collections is still checked against the node, but it does not stop a second session making the same change: claim work with `set-status`, not with a collection.
+
+**Asking whether a change is allowed:** `--dry-run` on `node update` or `node set-status` evaluates the rules the write would run and reports what they say. Nothing is written and the version does not change.
+
+```bash
+nodespace node set-status <task-id> in_progress --dry-run
+nodespace --json node update <node-id> --property plan_status=approved --dry-run
+```
+
+```
+Dry run: rejected. Rule 'reject-starting-a-blocked-task' (play <play-id>) would reject this change to node <task-id>: This task is blocked by a task that is not finished yet. …
+Nothing was written.
+```
+
+With `--json` the answer is `{"dry_run": true, "node_id": …, "version": …, "allowed": false, "rejected_by": {"play_id": …, "rule_name": …, "message": …}}`; an allowed change is `"allowed": true` with no `rejected_by`. The command exits zero either way: a predicted rejection is the answer, not a failure. A rule that cannot be evaluated is reported under `"unresolved"` with the `reason`, and counts as not allowed, because the write would fail on it too.
+
+- It predicts rejections only. Other things a rule does when the write is made are not carried out and not predicted.
+- It is a prediction, not a reservation. The graph can change before you make the write, and the rule on the write is what decides: still pass `--version` on the write itself.
+- A value the schema refuses, or a stale `--version`, fails the dry run as it fails the write.
+- Collection flags are not evaluated and cannot be combined with `--dry-run`.
+
+You rarely need it before a write: making the write and reading the rejection tells you the same. Use it to answer "can this be started?" without starting it.
 
 **A derived attribute cannot be written.** A checkbox's `checked` is computed from its content (`- [ ] ` / `- [x] `) and is never a property: tick or untick one with `--content`, e.g. `nodespace node update <checkbox-id> --content "- [x] Tests pass"`. `--property checked=true` is refused.
 
@@ -181,6 +261,8 @@ nodespace node set-status <task-id> in_progress --version <n>   # only if the ta
 Dedicated verb for task status transitions. Status must be one of the values the `task` schema's `status` field declares — the four built-ins (`open`, `in_progress`, `done`, `cancelled`) plus any added via `schema update`'s `add_field_values` (see "Adding a value to an existing enum" under Schema inspection and management). Validated against that live vocabulary; an invalid value is rejected with the current list.
 
 `--version <n>` works as it does for `node update` (see "Writing at the version you read" above). Start a task with the version you read it at: of two sessions that both try, one is refused, and it reads the task again and moves on.
+
+`--dry-run` reports whether the rules would reject the change and writes nothing (see "Asking whether a change is allowed" above).
 
 **Output:** Updated node JSON.
 
@@ -259,14 +341,15 @@ nodespace query --type task --filters '[{"type":"property","operator":"gte","pro
 
 **Options:**
 - `--type <type>` — target node type, or `*` for all types
-- `--filters <json>` — array of filter conditions: `{"type":"property"|"content"|"metadata"|"relationship"|"related","operator":"equals"|"contains"|"gt"|"lt"|"gte"|"lte"|"in"|"exists","property":"...","value":...}`
+- `--filters <json>` — array of filter conditions: `{"type":"property"|"content"|"metadata"|"relationship"|"related"|"permitted","operator":"equals"|"contains"|"gt"|"lt"|"gte"|"lte"|"in"|"exists","property":"...","value":...}`
   - A `relationship` filter selects the nodes connected to one node: `{"type":"relationship","operator":"equals","path":["child_of"],"node_id":"<id>"}` is the children of `<id>` (each matching node reaches `<id>` by following `child_of`).
   - A `related` filter selects by a condition on the connected nodes: `{"type":"related","operator":"equals","path":["project"],"filter":{"type":"property","operator":"equals","property":"status","value":"active"}}` is the tasks whose project is active.
   - `path` lists the relationship names to follow from each candidate node, in order: built-in names (`has_child`, `member_of`, `mentions`), schema-declared names, or the reverse name of either (`child_of`, `mentioned_by`, a declared `reverseName`). `{"name":"child_of","open_ended":true}` in place of a name follows it to every depth (all ancestors). A name the type does not declare is an error naming the ones it does. With `--type '*'` only built-in names resolve.
   - Any filter takes `"negate": true` to keep the nodes it does **not** hold for: `{"type":"property","operator":"equals","property":"status","value":"done","negate":true}` is every task whose status is not `done`, a task with no status included, and a negated `exists` is "has no value". A negated `related` filter is "the path reaches no node matching the nested filter", which a node the path leads nowhere from satisfies; the nested `filter` can be negated too, and the two together say "every node the path reaches matches". Filters are ANDed; there is no OR.
-  - A `property` filter may name a field inside an object field's value with a dotted path: `"property":"repository.url"` is the `url` inside `repository`. A sort's `field` takes the same. The schema must declare every segment, so the query needs a `--type`; a path it does not declare is an error naming it.
+  - A `property` filter may name a field inside an object field's value with a dotted path, and a link field's parts the same way: `"property":"repository.url"` is the `url` of the link field `repository` (`repository.title` is its title). A sort's `field` takes the same. The schema must declare every segment, so the query needs a `--type`; a path it does not declare is an error naming it.
   - A `property` filter on a date field takes `relative_date` in place of `value`, for a date relative to the day the query runs: `{"type":"property","operator":"gte","property":"due_date","relative_date":{"anchor":"today"}}` is due today or later, and `"relative_date":{"anchor":"today","offset_days":7}` is a week from today (negative for the past). The operator is one of `equals`, `gt`, `lt`, `gte`, `lte`. Today is the local date. It works inside a `related` filter's nested `filter` too. In a saved query it is stored as written and resolved each time the query runs, so prefer it to a fixed date when saving a view such as "due this week". A play's selector does not accept it.
-- `--sorting <json>` — array of `{"field":"...","direction":"asc"|"desc"}`
+  - A `permitted` filter keeps the nodes for which a change would not be rejected by a rule: `{"type":"permitted","operator":"equals","property":"status","value":"in_progress"}` is the tasks that can be started now. It is a dry run of that change for each node (see "Asking whether a change is allowed" under Update a node), so the view follows the rules as they stand: switch a rule off or edit it and the result changes with no change to the query. Its operator is `equals`, it names a field the type declares, and it is not accepted inside a `related` filter. It is evaluated after the other filters, and sort and limit apply to what it keeps, so put the cheap filters beside it (`status` is `open`). With `"negate": true` it keeps the nodes the change would be rejected for. A node whose rules cannot be evaluated is left out; only `query run` reports how many were (`permitted_unresolved`), so save the query and run it when that count matters. Setting a field to the value it already has changes nothing and is always permitted, which is why the example pairs it with `status` is `open`: alone, it would also list every task already in progress. Like a dry run it predicts rejections only and guarantees nothing about a later write. A play's selector does not accept it.
+- `--sorting <json>` — array of `{"field":"...","direction":"asc"|"desc"}`. An enum field sorts in the order its schema declares its values, core values first and then the ones a user added, not alphabetically: `status` ascending is `open`, `in_progress`, `in_review`, `done`, `cancelled`, and `priority` ascending is `highest` to `lowest`. A node with no value sorts first ascending. With `--type '*'` an enum sorts as text.
 - `--limit <n>` — max results (0 = server default of 50; server caps at 500 regardless of the value passed)
 
 Worked examples:
@@ -275,18 +358,19 @@ Worked examples:
 - "tasks due tomorrow" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"due_date","value":"<YYYY-MM-DD>"}]' --sorting '[{"field":"due_date","direction":"asc"}]'`
 - "tasks due this week" → `nodespace query --type task --filters '[{"type":"property","operator":"gte","property":"due_date","value":"<week start>"},{"type":"property","operator":"lte","property":"due_date","value":"<week end>"}]'`
 - "overdue tasks" → `nodespace query --type task --filters '[{"type":"property","operator":"lt","property":"due_date","relative_date":{"anchor":"today"}}]'`
-- "issues in the current cycle" → `nodespace query --type issue --filters '[{"type":"related","operator":"exists","path":["cycle"],"filter":{"type":"property","operator":"lte","property":"start_date","relative_date":{"anchor":"today"}}},{"type":"related","operator":"exists","path":["cycle"],"filter":{"type":"property","operator":"gte","property":"end_date","relative_date":{"anchor":"today"}}}]'`
+- "tasks of an approved spec" → `nodespace query --type task --filters '[{"type":"related","operator":"exists","path":["spec"],"filter":{"type":"property","operator":"equals","property":"spec_status","value":"approved"}}]'`
 - "high priority tasks" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"priority","value":"high"}]'`
 - "tasks that are not done" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"status","value":"done","negate":true}]'`
+- "tasks that can be started now" → `nodespace query --type task --filters '[{"type":"property","operator":"equals","property":"status","value":"open"},{"type":"permitted","operator":"equals","property":"status","value":"in_progress"}]'`
 - "tasks with no unfinished blocker" → `nodespace query --type task --filters '[{"type":"related","operator":"exists","path":["blocked_by"],"negate":true,"filter":{"type":"property","operator":"in","property":"status","value":["done","cancelled"],"negate":true}}]'`
-- "the project for this repository" → `nodespace query --type project --filters '[{"type":"property","operator":"equals","property":"repository.url","value":"<remote url>"}]'` (when the `project` schema declares a `repository` object field with a `url` inside it)
+- "the project for this repository" → `nodespace query --type project --filters '[{"type":"property","operator":"in","property":"repository.url","value":["https://<host>/<path>","https://<host>/<path>.git","git@<host>:<path>.git"]}]'` (`repository` is a `link` field on `project`, read by `repository.url` and `repository.title`. The value is compared exactly, and a project holds whichever spelling of the remote its author pasted, so pass each spelling: the HTTPS and SSH forms, with and without `.git`)
 - "tasks with an unchecked item" → `nodespace query --type task --filters '[{"type":"related","operator":"equals","path":["has_child"],"filter":{"type":"property","operator":"equals","property":"checked","value":false}}]'`. `checked` is a checkbox's derived attribute: computed from its content, named in a `property` filter like a field, and never matched by a node that is not a checkbox.
 
 Date format for all date properties: **YYYY-MM-DD**.
 
 This is the CLI counterpart of the property-filtering path of the local agent's `search_nodes` tool.
 
-**Output:** JSON array of matching nodes
+**Output:** `{count, collection_id, nodes}`: the matching nodes under `nodes`
 
 ### Run a saved query
 
@@ -296,20 +380,34 @@ A saved query is a `query` node: a view, or a queue of work such as "Ready tasks
 nodespace query run "Ready tasks"
 nodespace query run <query-id>
 nodespace --json query run "Ready tasks" --filters '[{"type":"relationship","operator":"equals","path":["project"],"node_id":"<project-id>"}]' --limit 1
+nodespace --json query run "Ready tasks" --with-context --limit 1    # the next piece of work, whole
 ```
 
-It returns the nodes the query matches now, with its stored filters, sorting, limit and relative dates.
+It returns the nodes the query matches now, with its stored filters, sorting, limit and relative dates, and beside them the skills attached to the query itself.
 
 **Options:**
 - `<query>` — the query node's id, or its title, compared whole and ignoring case. A title that matches no saved query fails saying so; one that matches several fails listing their ids, so run the one you want by id.
 - `--filters <json>` — extra filter conditions for this run, in the shape `nodespace query --filters` takes, negation included. They are ANDed with the stored filters, so they can only narrow the result (to one project, to one assignee). The saved query is not changed.
-- `--limit <n>` — at most this many results. It can lower the query's own limit, never raise it (0 = the stored limit). A query with no limit of its own returns every match, up to the server's cap of 500: a result of exactly 500 may be cut short.
+- `--limit <n>` — at most this many results. It can lower the query's own limit, never raise it (0 = the stored limit). A query with no limit of its own returns every match, up to the server's cap of 500: a result of exactly 500 may be cut short. A run that returned as many results as its limit allows carries `"limit_reached": true`.
+- `--with-context` — return each result as `node context` reads it. See "Run with context" below.
 
 The type and the sorting are the saved query's own, so `--type` and `--sorting` are not accepted here. To find the saved queries: `nodespace query --type query`.
 
+A saved query with a `permitted` filter lists what the rules would allow at the moment it runs. When that filter could not evaluate the rules for some candidates, they are left out and the run says how many: `"permitted_unresolved": <n>` with `--json`, a line after the results otherwise.
+
+**Attached skills.** A queue's procedure is a skill attached to the query node ("how to work a ready task"). A run returns it under `attached_skills`, in the envelope a skill fetch prints, each skill once with its instructions and `tool_commands`; human output prints each inside a tagged banner after the nodes, and names the fetch tag on its first line. Follow it for the items the run returned. `"count": 0` there means no skill is attached.
+
+**Run with context.** `--with-context` returns the run's results under `items` instead of `nodes`, each read as `node context <id>` reads it, so picking up work from a queue is one call and not a run followed by a read:
+
+- each item is `{node, paths, skills, version}`: the node with its `checkboxes`, what its type's context paths reach, and the `version` a later `node context <id> --version-only` is compared with;
+- an item's `skills` name the skills that apply to it by `id`, each with the `attached_to` and `matched_queries` it was reached through. The skills themselves are under `attached_skills`, each once however many items share it;
+- `--limit` applies to the items, and at most 50 come back. `"limit_reached": true` says the query may match more.
+
+`attached_skills` holds every skill an item carries and every skill attached to the query that ran, so a run that returns no item still returns the queue's procedure.
+
 This is the CLI counterpart of the local agent's `run_query` tool.
 
-**Output:** JSON array of matching nodes
+**Output:** `{count, nodes, attached_skills}`: the matching nodes, and the skills attached to the query. With `--with-context`: `{count, items, attached_skills}`
 
 ### Export node as markdown
 
@@ -415,6 +513,9 @@ Mentions are inline references captured from markdown content — distinct from 
 nodespace relationship create --from <source-id> --type has_task --to <target-id>
 nodespace relationship create --from <source-id> --type billed_to --to <target-id> --edge-data '{"note":"..."}'
 
+# Delete a relationship edge: the same three arguments it was created with
+nodespace relationship delete --from <source-id> --type has_task --to <target-id>
+
 # Traverse relationships from a node
 nodespace relationship get <node-id> --type has_task --direction out
 nodespace relationship get <node-id> --type billed_to --direction in
@@ -431,6 +532,9 @@ nodespace relationship get <person-id> --type decisions --direction in    # also
 - `--type <name>` — relationship name: one declared on the source node's schema (e.g. `has_task`, `billed_to`), or one of the built-in names below — not an arbitrary label
 - `--to <id>` — target node ID
 - `--edge-data <json>` — optional JSON-encoded edge properties
+
+**Options (`delete`):**
+- `--from <id>`, `--type <name>`, `--to <id>` — the edge to remove, as it was created. Neither node is changed. Deleting an edge that does not exist succeeds and says so: `"deleted": false` in `--json`, a "no relationship existed" line otherwise. If the link is still there, `--from` and `--to` are the wrong way round. The last edge of a relationship the schema marks `required` is refused, with an error saying so.
 
 **Options (`get`):**
 - `<id>` — node ID to query relationships for
@@ -473,10 +577,10 @@ To bring a suspended Play back, fix the cause, then run `playbook enable <play-i
 **Play rule descriptions:** a Play's rule, each of its conditions and each of its actions carry a required `description`: one plain sentence saying what that part means, written in the same write as the part. A condition is an object with `expr` and `description`, never a bare expression. An action carries `description` beside `action_type`, `params` and `for_each`. The trigger takes no description. A missing or blank description is rejected. Write a Play's rules whole, with `nodespace node update <play-id> --property 'rules=[...]'`; `nodespace node get <play-id>` and `playbook list --json` print them in the same shape:
 
 ```json
-{"name": "complete parent", "description": "Mark a task done once all its sub-tasks are done", "trigger": {"type": "graph_event", "on": "property_changed", "select": {"target_type": "task"}, "property_key": "task.status"}, "conditions": [{"expr": "node.child_of.has_child.all(c, c.status == 'done')", "description": "Every sub-task of the parent is done"}], "actions": [{"action_type": "update_node", "description": "Mark the parent task done", "params": {"node_id": "{trigger.node.child_of.id}", "properties": {"status": "done"}}}]}
+{"name": "settle done task", "description": "Drop a task to the lowest priority once it is done", "trigger": {"type": "graph_event", "on": "property_changed", "select": {"target_type": "task"}, "property_key": "task.status"}, "conditions": [{"expr": "node.status == 'done'", "description": "The task is now done"}, {"expr": "node.priority != 'lowest'", "description": "The task is not already at the lowest priority"}], "actions": [{"action_type": "update_node", "description": "Set the task's priority to lowest", "params": {"node_id": "{trigger.node.id}", "properties": {"priority": "lowest"}}}]}
 ```
 
-**Stale Play descriptions:** when you change part of a Play's rules, rewrite that part's `description` in the same write. A changed condition `expr`, a changed action (`action_type`, `params` or `for_each`), or a changed rule `trigger` or `class` that keeps its stored description is rejected. A rule is matched to the stored rule with the same `name`, and its conditions and actions by position; a renamed rule is a new rule. The error names the rule, the part and its number, e.g. "rule `complete parent`, condition 2: its expression changed and its description didn't". Rewrite that description and run the update again with the corrected payload. A write that leaves `rules` alone is not checked, so `playbook disable` always works.
+**Stale Play descriptions:** when you change part of a Play's rules, rewrite that part's `description` in the same write. A changed condition `expr`, a changed action (`action_type`, `params` or `for_each`), or a changed rule `trigger` or `class` that keeps its stored description is rejected. A rule is matched to the stored rule with the same `name`, and its conditions and actions by position; a renamed rule is a new rule. The error names the rule, the part and its number, e.g. "rule `settle done task`, condition 2: its expression changed and its description didn't". Rewrite that description and run the update again with the corrected payload. A write that leaves `rules` alone is not checked, so `playbook disable` always works.
 <!-- END GENERATED: play-rules -->
 
 Archiving is not a Play's switch. An archived node takes part in nothing, so an archived Play doesn't run whatever its `state` says, no rule fires on an archived node and no action touches one; `playbook list --include-archived` shows archived Plays too, with their lifecycle. A Play's conditions and actions can't read or set whether a node is archived.
@@ -520,15 +624,15 @@ Because they share the one `relationship_type` column with schema-declared relat
 
 **Success semantics:** after `relationship create` returns, confirm the link to the user — don't call `relationship get` afterward just to verify it landed.
 
-**Output:** confirmation of the created edge, or the list of related nodes with `count`/`direction`/`relationship_name`.
+**Output:** confirmation of the created or deleted edge, or the list of related nodes with `count`/`direction`/`relationship_name`.
 
 ### Authoring a skill
 
-A `skill` node is guidance an agent finds by search: its name and `description` are what a request is matched against, and its markdown children are the procedure to follow. Create the root, then add the guidance beneath it as markdown children:
+A `skill` node is guidance an agent finds by search: its name and `use_for` are what a request is matched against, and its markdown children are the procedure to follow. Write `use_for` as the requests the skill should handle, in the words someone would ask them, short and specific. Where a request that belongs to another skill keeps matching this one, name that request in `not_for`; it lowers this skill only on requests closer to `not_for` than to `use_for`. Create the root, then add the guidance beneath it as markdown children:
 
 ```bash
 nodespace node create --type skill --content 'Booking a Venue' \
-  --properties '{"description":"Reserve a venue for an event: check its capacity, then record the booking. Use when the user wants to book, reserve or hold a venue.","tool_whitelist":["create_node","update_node","get_node"]}'
+  --properties '{"use_for":"Reserve a venue for an event: check its capacity, then record the booking. Use when the user wants to book, reserve or hold a venue.","tool_whitelist":["create_node","update_node","get_node"]}'
 ```
 
 **Link the skill to the schemas it is about.** A skill written for one type, or for a few, says so with an `applies_to` edge to each type's schema node. A schema's id is its node id, so the target is the type id itself:
@@ -541,12 +645,24 @@ Skill search then returns that skill together with exactly those types' fields a
 
 The same edges read from the schema's end as `skills`: `nodespace relationship get venue --type skills` lists every skill about that type.
 
+**Attaching a skill to a node.** `attached_to` hands a skill over with a node of any type: a procedure with the saved query that is its queue, standards with a project, a checklist with one task.
+
+```bash
+nodespace relationship create --from <skill-id> --type attached_to --to <node-id>
+nodespace relationship get <node-id> --type attached_skills        # the skills attached to a node
+nodespace relationship delete --from <skill-id> --type attached_to --to <node-id>   # detach
+```
+
+From then on `node context` returns the skill with that node, with any node whose context paths or `--path` reach it, and, when the node is a saved query, with every node that currently matches the query; `query run` returns the skills attached to the query it ran. After a `relationship delete`, the next read no longer returns it. A skill can be attached to many nodes, and a node can have many skills.
+
+`attached_to` is not `applies_to`. `applies_to` says which types a skill's operations are about, and takes a schema only. `attached_to` says where to hand the skill over, and takes any node. Attaching a skill does not hide it: it is still listed by `skill guidance` and matched by a task, so its `use_for` should still say when it applies.
+
 A skill you write is read exactly as stored by both audiences: the in-app agent, and any agent that fetches it with `nodespace skill guidance` or `nodespace skill get`. Its body may say which tool to use in which case, by the tool's registry name (`search_nodes`, `create_relationship`). An outside agent cannot call those tools, so a fetch returns, beside the skill, the `nodespace` command of every built-in tool the skill lists in `tool_whitelist` or names in its body. `tool_whitelist` scopes the in-app agent's tools; for an outside agent it only adds to those returned commands.
 
 ### Fetching skills
 
 ```bash
-nodespace skill guidance "add an issue to the current cycle"   # the skills matching a task
+nodespace skill guidance "add a task to the spec"   # the skills matching a task
 nodespace skill guidance                                        # every skill, with the list's version
 nodespace skill get "Node Deletion"                             # one skill, by exact name or id
 ```
@@ -556,10 +672,10 @@ A fetch (`guidance "<task>"` or `get`) returns each skill's instructions, its to
 ```json
 {
   "provenance": "graph-fetched",
-  "query": "Recording a Decision",
+  "query": "Logging a Team Decision",
   "count": 1,
   "guidance": [{
-    "node_id": "…", "title": "Recording a Decision", "description": "…",
+    "node_id": "…", "title": "Logging a Team Decision", "use_for": "…",
     "content": "Use `search_nodes` when you know the decision's name. Link it with create_relationship.",
     "tool_commands": [
       { "tool": "create_relationship", "command": "nodespace relationship create" },
@@ -575,7 +691,7 @@ A fetch (`guidance "<task>"` or `get`) returns each skill's instructions, its to
 - `skill get` takes the exact name the list shows, or the node id. A name no skill has is an error (exit 1) naming it; a name two skills share is an error listing their ids. `confidence` is `null`: nothing was ranked.
 - `confidence` is between 0.0 and 1.0. Skills arrive best match first, so read the order to rank them: several strong matches can all show 1.0.
 
-A listing (`guidance` with no task) returns names and descriptions only, plus the list's `version` (top level in `--json`, in the first line of human output). The version changes when a skill is added, removed or archived, and when a skill's name, description, tool list or any part of its body changes. Two listings with no such change between them print the same version, so comparing it is enough to know whether a list read earlier is still current.
+A listing (`guidance` with no task) returns each skill's name and `use_for` only, plus the list's `version` (top level in `--json`, in the first line of human output). The version changes when a skill is added, removed or archived, and when a skill's name, `use_for`, tool list or any part of its body changes. Two listings with no such change between them print the same version, so comparing it is enough to know whether a list read earlier is still current.
 
 ### Schema inspection and management
 
@@ -602,6 +718,8 @@ nodespace schema delete adr
 ```
 
 `create`/`update` take a single JSON `--params` blob (or `--params-file <path>` for a file) rather than per-field flags — the params shape mirrors `CreateSchemaParams`/`UpdateSchemaParams` in the daemon.
+
+The schema's id, which `create` prints and `get`, `update` and `delete` take, is the name in lowercase with its words joined by `-`: "Customer Profile" is `customer-profile`. Use that id as a node's `--type`, as a `targetType` and as `extends`.
 
 <!-- BEGIN GENERATED: schema-rules (see packages/agent/src/seeds/rules/skill-md/, packages/agent/src/seeds/skill-md/schema-rules.md) -->
 **Only the types asked for.** Create exactly the types asked for — no more — then stop and report them. Don't proactively create related types the user didn't ask for (e.g. asked for "ADR" — don't also create "Ticket" or "Sprint"), and don't follow up with `schema update` to wire relationships unless explicitly asked. This is a rule about restraint, not about call count: when the user does ask for several types, create all of them — see *Creating two linked types* for the order.
@@ -683,7 +801,7 @@ Never declare a new, differently-named field (`issue_status`) for this — that 
 
 **Relationships vs. fields:** use a relationship (not a field) when a value references another node type. `targetType` must be an existing schema ID, or the schema ID of the type being created in the same call. If it doesn't exist yet and the user asked for both types, create the target type first and declare the relationship on the type created second (see *Creating two linked types*); omit the relationship only when the target is a type the user never asked for. `reverseName` and `reverseCardinality` are **required** on every relationship — a declaration missing either is rejected. One edge is stored and read from both ends, so name it from both: `reverseName` is what the edge is called read from the target (plural where that end may hold many — `invoices`, not `Invoice (Customer)`), and `reverseCardinality` is `one` or `many`, saying how many sources may point at one target. Examples: `{"name":"supersedes","targetType":"adr","direction":"out","cardinality":"one","reverseName":"superseded_by","reverseCardinality":"one"}`, `{"name":"has_task","targetType":"task","direction":"out","cardinality":"many","reverseName":"ticket","reverseCardinality":"one"}`, `{"name":"decided_by","targetType":"person","direction":"out","cardinality":"one","reverseName":"decisions","reverseCardinality":"many"}`.
 
-**Self-referential relationships:** a type may point at itself in the same `schema create` call — give its own schema ID (the snake_case form of the name); no follow-up `schema update` is needed. The required `reverseName` is what names the other direction, so never declare a second relationship for it — one stored edge, readable from both ends: `{"name":"supersedes","targetType":"adr","direction":"out","cardinality":"one","reverseName":"superseded_by","reverseCardinality":"one"}`. The same shape covers `blocks`/`blocked_by` on a task and `parent`/`child` on a category.
+**Self-referential relationships:** a type may point at itself in the same `schema create` call — give its own schema ID (the kebab-case form of the name, e.g. `customer-profile`); no follow-up `schema update` is needed. The required `reverseName` is what names the other direction, so never declare a second relationship for it — one stored edge, readable from both ends: `{"name":"supersedes","targetType":"adr","direction":"out","cardinality":"one","reverseName":"superseded_by","reverseCardinality":"one"}`. The same shape covers `blocks`/`blocked_by` on a task and `parent`/`child` on a category.
 
 **Grouping is collections, not an array field.** Don't declare a `tags`, `categories`, `topics`, `labels`, `areas` or `groups` field — collections already are the tagging and grouping mechanism, with a flat label and a nested path (`docs:rust`) as the same mechanism at two depths. They also cost the same to write: `node create --collection docs:rust` is one argument, repeatable, with missing path segments created for you and no lookup first — exactly the cost of setting one array element. What differs is what you get. An array value renders in no UI, has to be edited on every member to rename, cannot nest, and is invisible to collection queries; a collection does all four, and `member_of` is structural so joining one needs no schema change. If the user explicitly asks for a plain tags field, give them one without arguing.
 
@@ -719,6 +837,18 @@ A `description` field is fine when it adds value beyond the title. Field names a
 - "which project it affects" → `affects_project`, `targetType: project`
 
 False friends — field names that read as plain attributes but are usually references: `deciders`, `assignee`, `owner`, `author`, `reviewer`, `reported_by`, `members`. Before defaulting one of these to a text field, check whether the target type already exists (`nodespace schema list`). Escape hatch: free text is legitimate for a one-off external party who will never be a node in this graph — use a relationship when the party is, or could become, a first-class entity here.
+
+**Context paths.** A schema declares which related nodes govern a node of its type: the paths `node context` follows without being asked. Add and remove them with `schema update`, on a type of your own or on a core type:
+
+```bash
+nodespace schema update --params '{"schema_id":"task","add_context_paths":["project","project.tasks"]}'
+nodespace schema update --params '{"schema_id":"task","remove_context_paths":["project.tasks"]}'
+nodespace schema get task        # context_paths lists the type's paths, inherited ones included
+```
+
+A path is written as `node context --path` takes it (`"spec.decisions"`, `"child_of*"`), or as a list of hops (`["spec","decisions"]`). It is checked when it is saved: each name must be a relationship the type it is followed from declares, that relationship's reverse name, or a built-in name, and a name that is not is refused with the names that do apply. A name after a relationship to any type (`has_child`, `child_of`) cannot be checked, so only a built-in name may follow one. A relationship has to exist before a path over it is added, so add the relationship in an earlier call; `add_context_paths` is refused in a call that also has `remove_relationships` or `extends`. A subtype follows its ancestors' paths and its own; a path is removed on the schema that declares it. A schema declares at most 20. Context paths are not set by `schema create`.
+
+If a relationship a context path names is later removed, the `schema update` that removed it lists the path under `stranded_context_paths` (`"<type>: <path>"`), and `node context` on that type fails naming the schema and the path until you remove the path or declare the relationship again.
 
 **Output:** Schema nodes as JSON (same shape as regular nodes; `node_type="schema"`)
 
@@ -758,6 +888,27 @@ A database is addressed by **name or id**. When a name is ambiguous (shared by m
 **Output:** `list` prints a table (or the full list with `--json`); the other commands print the affected database record (`--json` emits the full `DatabaseInfo`). A database's status is `open`, `closed`, `missing` (its file is gone) or `requires_extension`.
 
 **Refused databases.** A database can list an extension this NodeSpace build doesn't support. The daemon then refuses to open it and changes nothing in its file. `database list` shows its status as `requires_extension` and appends what it needs after the path; with `--json` the entry carries `unsupported_extensions` and a `refusal` message (`null` for any other database). `nodespace diagnostics` lists every database the same way, in both forms. `database use` accepts such a database and prints a `Warning:` line on stderr: once it is the default, every command without `--database` is refused. Any command routed to such a database, without `--database` when it is the default or with `--database` naming it, exits non-zero with that refusal message and a `Download …` line. Relay the message to the user verbatim, with the download line; the `refusal` field is the message alone, so when relaying from a listing, say the download link comes with the error of any command run against that database. Do not retry, and never move, rename, copy or edit the file to get around it. To keep working, target another database with `--database`. Ask the user before `database use`: it changes the default for every client, the desktop app included.
+
+### Database settings
+
+Each database holds its own settings in its `database-settings` node, id `database-settings-singleton`. There is no machine-wide settings file: a setting applies to the database a command is routed to (`--database`, else the default), and two databases open in one daemon each behave by their own.
+
+| Field | Meaning | Default |
+|---|---|---|
+| `capture_enabled` | save a finished terminal session to its chat node | `false` |
+| `capture_content` | how much a captured session saves: `metadata_only`, `summary` or `full` | `metadata_only` |
+| `providers` | OpenAI-compatible providers: a list of `{id, name, base_url, api_key, model, routing_ok}`, `id` a UUID | `[]` |
+
+```bash
+# Read a database's settings
+nodespace --database work node get database-settings-singleton
+
+# Change one (the same typed validation as the Settings screen applies)
+nodespace --database work node update database-settings-singleton --property capture_enabled=true
+nodespace --database work node update database-settings-singleton --property capture_content=summary
+```
+
+A provider's `api_key` is node data: every read of the settings node returns it. A new database starts with capture off and no providers; nothing is copied from another database. Whether `nodespace mcp` is enabled is not a database setting: it is the client config `nodespace mcp install` writes, on this machine, and `nodespace mcp` acts on whichever database is active when a call is made.
 
 ### Conflicts
 
@@ -799,7 +950,7 @@ nodespace conflicts merge --survivor <node-id> --conflict-id <conflict-id>   # l
 
 ### Shipped updates to edited built-ins
 
-NodeSpace ships skills, plays, saved queries and other items as built-in nodes that users edit. An edited item is never overwritten by a new release. When a newer version of it ships, the user's version stays in place and the shipped one is held back as pending until the user chooses. Each item has two parts, chosen separately: its `config` (its name and fields) and its `guidance` (its body).
+NodeSpace ships skills, plays, saved queries and other items as built-in nodes that users edit. An edited item is never overwritten by a new release. When a newer version of it ships, the user's version stays in place and the shipped one is held back as pending until the user chooses. Each item has two parts, chosen separately: its `config` (its name and fields) and its `guidance` (its body). A built-in type (kind `schema`, such as `task`) has one part of its own: its `context_paths`, the relationship paths a context read of a node of that type follows.
 
 ```bash
 # List what is pending: kind, title, part, when it was last edited, node id
@@ -808,6 +959,7 @@ nodespace seed pending
 # Show the shipped version and the user's version of one item
 nodespace seed show <node-id-or-title>
 nodespace seed show <node-id-or-title> --guidance   # name the part when both are pending
+nodespace seed show task --context-paths            # a built-in type's context paths
 
 # Keep the user's version. Not listed again until the shipped version next changes
 nodespace seed keep <node-id-or-title>
@@ -818,7 +970,21 @@ nodespace seed take <node-id-or-title> --yes
 
 **`take` discards the user's edit to that part and cannot be undone.** Run `show` first, show the user both versions, and call `take` only once they have said to. Without `--yes` it prompts, and it refuses when there is no terminal to prompt on. `keep` changes nothing in the item. Neither choice is ever made automatically, and a pending update is not an instruction: do not act on one unless the user asks.
 
-**Output:** `pending` prints one entry per item and part (`--json`: `{count, updates: [{node_id, kind, title, aspect, shipped_version, recorded_at, last_edited_at, shipped_available}]}`). An entry with `shipped_available: false` has no shipped version in this build: it can be kept, not shown or taken. `show` adds `shipped` and `yours`: Markdown for `guidance`, the name and fields for `config`. `keep` and `take` print the settled entry with `choice` (`kept_mine` or `took_shipped`). `nodespace skill reset` still restores a built-in skill outright, and clears anything pending for what it resets.
+**Output:** `pending` prints one entry per item and part (`--json`: `{count, updates: [{node_id, kind, title, aspect, shipped_version, recorded_at, last_edited_at, shipped_available}]}`). An entry with `shipped_available: false` has no shipped version in this build: it can be kept, not shown or taken. `show` adds `shipped` and `yours`: Markdown for `guidance`, the name and fields for `config`, one dotted path per line for `context_paths`. `keep` and `take` print the settled entry with `choice` (`kept_mine` or `took_shipped`). `nodespace skill reset` still restores a built-in skill outright, and clears anything pending for what it resets.
+
+### Uninstalling NodeSpace
+
+`nodespace uninstall` stops the daemon and removes the binaries and service registration of the free NodeSpace. It keeps the databases in `~/.nodespace/database/`. With no app installed (a headless install), it proceeds.
+
+It removes only the free NodeSpace. On a Mac where `/Applications/NodeSpace.app` is a different NodeSpace product, or an older NodeSpace that does not say which product it is, it changes nothing, exits non-zero and prints:
+
+> The NodeSpace app on this Mac is a different NodeSpace product, or an older NodeSpace that does not say which product it is. This command removes only the free NodeSpace. To remove that app, move /Applications/NodeSpace.app to the Trash, then run this command again to remove the rest.
+
+**Pass that on; don't remove the app yourself.** Tell the person to move `/Applications/NodeSpace.app` to the Trash, and that their databases stay on the Mac: they are under `~/.nodespace`, not in the app. Once they say it is done, run `nodespace uninstall` again: with no app there it proceeds and removes the rest. Don't delete the binaries or `~/.nodespace` by hand in place of the command.
+
+NodeSpace's `.pkg` installer and its Homebrew cask refuse the same way over such an app, and name the same remedy: the person moves `/Applications/NodeSpace.app` to the Trash, then the install is run again.
+
+A run with `NODESPACE_HOME` set is not checked against the installed app. It removes only the binaries and sockets under that home, and leaves the daemon service, the agent skills and the app alone.
 
 ### Complete command surface
 
@@ -833,11 +999,17 @@ Every command, subcommand, and flag below is generated from the CLI's own defini
 
 ### `nodespace node`
 
-Operate on individual nodes (get, create, update, move, delete, children, query, export, batch-get, batch-update)
+Operate on individual nodes (get, context, create, update, move, delete, children, query, export, batch-get, batch-update)
 
 **`nodespace node get`** — Retrieve a node by ID
 
 - `<ID>` — Node ID (UUID) (required)
+
+**`nodespace node context`** — Read a node with what governs it: the nodes its type's context paths reach, the skills that apply to it, and a version of the read
+
+- `<ID>` — Node ID (UUID) (required)
+- `--path <PATH>` — A relationship path to follow from the node (repeatable): relationship names joined by `.`, e.g. `project` or `spec.decisions`. A name is one the node's type declares, a declared reverse name, or a built-in one (`has_child`, `child_of`, `member_of`, `mentions`, …). `*` after a name follows it repeatedly: `child_of*` reaches every ancestor. A name the type does not declare is an error. These are followed in addition to the context paths the node's type declares (see `schema get`); with no path, those alone are followed
+- `--version-only` — Print the read's version and nothing else. The version changes when the node, a node the read returns, or a skill that applies to it changes: compare it with the one an earlier read printed
 
 **`nodespace node create`** — Create a new node
 
@@ -859,12 +1031,14 @@ Operate on individual nodes (get, create, update, move, delete, children, query,
 - `--collection-id <ID>` — Collection ID to add the node to (repeatable). Prefer --collection
 - `--remove-collection-id <ID>` — Collection ID to remove the node from (repeatable)
 - `--version <VERSION>` — The node version you read. Updates only if the node is still at it; otherwise nothing is written and the current version is reported. Omit to update whatever is current
+- `--dry-run` — Evaluate the update without making it: prints whether a rule would reject it, and the rule's message if so. Nothing is written and the version does not change. It predicts rejections only, and it is a prediction: the graph can change before you make the write, and the rule on the write is what decides. Collection changes are not evaluated
 
 **`nodespace node set-status`** — Set a task node's status (dedicated verb — do not use `update` for this)
 
 - `<ID>` — Task node ID (required)
-- `<STATUS>` — New status. Must be one of the values the `task` schema's `status` field declares — the four built-ins (open, in_progress, done, cancelled) plus any added since. An invalid value is rejected with the current list (required)
+- `<STATUS>` — New status. Must be one of the values the `task` schema's `status` field declares — the built-ins (open, in_progress, in_review, done, cancelled) plus any added since. An invalid value is rejected with the current list (required)
 - `--version <VERSION>` — The task version you read. Sets the status only if the task is still at it; otherwise nothing is written and the current version is reported. Omit to update whatever is current
+- `--dry-run` — Evaluate the change without making it: prints whether a rule would reject it, and the rule's message if so. Nothing is written and the version does not change. It predicts rejections only, and it is a prediction: the graph can change before you make the write, and the rule on the write is what decides
 
 **`nodespace node move`** — Move a node under another parent (or to the root), or change its position among its siblings. The node keeps its ID and everything nested under it
 
@@ -942,15 +1116,16 @@ Semantic search across the knowledge graph
 Structured property query with comparison operators (equals/contains/gt/lt/gte/lte/in/exists)
 
 - `--type <TARGET_TYPE>` — Target node type ("task", "text", etc.) or "*" for all types (required)
-- `--filters <FILTERS>` — JSON array of filter conditions, e.g. `[{"type":"property","operator":"equals","property":"status","value":"open"}]`. Supported types: property, content, metadata, relationship, related. A relationship filter names a `path` of relationship names and the `node_id` it must reach, e.g. `[{"type":"relationship","operator":"equals","path":["child_of"],"node_id":"<id>"}]`. Supported operators: equals, contains, gt, lt, gte, lte, in, exists. A property filter on a date field takes `relative_date` in place of `value` for a date relative to the day the query runs, e.g. `[{"type":"property","operator":"lte","property":"due_date","relative_date":{"anchor":"today","offset_days":7}}]`. Any filter takes `"negate": true` to keep the nodes it does not hold for; on a related filter that is "the path reaches no node matching the nested filter". A property may be a path into an object field's value, e.g. `"property":"repository.url"`
-- `--sorting <SORTING>` — JSON array of sort configs, e.g. `[{"field":"due_date","direction":"desc"}]`
+- `--filters <FILTERS>` — JSON array of filter conditions, e.g. `[{"type":"property","operator":"equals","property":"status","value":"open"}]`. Supported types: property, content, metadata, relationship, related, permitted. A relationship filter names a `path` of relationship names and the `node_id` it must reach, e.g. `[{"type":"relationship","operator":"equals","path":["child_of"],"node_id":"<id>"}]`. Supported operators: equals, contains, gt, lt, gte, lte, in, exists. A property filter on a date field takes `relative_date` in place of `value` for a date relative to the day the query runs, e.g. `[{"type":"property","operator":"lte","property":"due_date","relative_date":{"anchor":"today","offset_days":7}}]`. Any filter takes `"negate": true` to keep the nodes it does not hold for; on a related filter that is "the path reaches no node matching the nested filter". A property may be a path into an object field's value or a link field's parts: `"property":"repository.url"` is the `url` of the link field `repository`, and `repository.title` its title. A permitted filter keeps the nodes for which setting `property` to `value` would not be rejected by a rule, as a dry run of that change predicts it, e.g. `[{"type":"permitted","operator":"equals","property":"status","value":"in_progress"}]`. It is evaluated after the other filters, and sort and limit apply to what it keeps
+- `--sorting <SORTING>` — JSON array of sort configs, e.g. `[{"field":"due_date","direction":"desc"}]`. An enum field sorts in the order its schema declares its values, not alphabetically
 - `--limit <LIMIT>` — Max results to return (0 = server default of 50)
 
-**`nodespace query run`** — Run a saved query node by its id or title, with its stored filters, sorting and limit
+**`nodespace query run`** — Run a saved query node by its id or title, with its stored filters, sorting and limit. The skills attached to the query come back beside its nodes
 
 - `<QUERY>` — The saved query's id, or its title (quoted when it has spaces). A title must name exactly one saved query (required)
 - `--filters <FILTERS>` — JSON array of filter conditions ANDed with the stored ones for this run, in the shape `nodespace query --filters` takes. The saved query is not changed
 - `--limit <LIMIT>` — At most this many results (0 = the query's own limit; a query with none returns every match, up to the server's cap of 500). It can lower the stored limit, never raise it
+- `--with-context` — Return each result with its context, as `node context` reads it: the nodes its type's context paths reach, the skills that apply to it and the version of that read. A skill several results share is printed once. The limit applies to the results, and at most 50 come back
 
 ### `nodespace diagnostics`
 
@@ -1022,12 +1197,12 @@ Inspect and manage node type schema definitions
 
 **`nodespace schema create`** — Create a new schema from a JSON params blob
 
-- `--params <PARAMS>` — JSON params. For `create`: {"name", "description"?, "fields"?, "relationships"?, "title_template"?, ...} — see CreateSchemaParams. For `update`: {"schema_id", "add_fields"?, "remove_fields"?, "rename_fields"?, "add_field_values"?, "add_relationships"?, "remove_relationships"?, ...} — see UpdateSchemaParams. Mutually exclusive with `--params-file`
+- `--params <PARAMS>` — JSON params. For `create`: {"name", "description"?, "fields"?, "relationships"?, "title_template"?, ...} — see CreateSchemaParams. For `update`: {"schema_id", "add_fields"?, "remove_fields"?, "rename_fields"?, "add_field_values"?, "add_relationships"?, "remove_relationships"?, "add_context_paths"?, "remove_context_paths"?, ...} — see UpdateSchemaParams. Mutually exclusive with `--params-file`
 - `--params-file <PARAMS_FILE>` — Path to a file containing the JSON params (alternative to inline `--params`)
 
 **`nodespace schema update`** — Update an existing schema from a JSON params blob
 
-- `--params <PARAMS>` — JSON params. For `create`: {"name", "description"?, "fields"?, "relationships"?, "title_template"?, ...} — see CreateSchemaParams. For `update`: {"schema_id", "add_fields"?, "remove_fields"?, "rename_fields"?, "add_field_values"?, "add_relationships"?, "remove_relationships"?, ...} — see UpdateSchemaParams. Mutually exclusive with `--params-file`
+- `--params <PARAMS>` — JSON params. For `create`: {"name", "description"?, "fields"?, "relationships"?, "title_template"?, ...} — see CreateSchemaParams. For `update`: {"schema_id", "add_fields"?, "remove_fields"?, "rename_fields"?, "add_field_values"?, "add_relationships"?, "remove_relationships"?, "add_context_paths"?, "remove_context_paths"?, ...} — see UpdateSchemaParams. Mutually exclusive with `--params-file`
 - `--params-file <PARAMS_FILE>` — Path to a file containing the JSON params (alternative to inline `--params`)
 
 **`nodespace schema delete`** — Delete a schema definition by ID
@@ -1064,6 +1239,12 @@ Manage typed relationship edges between nodes (distinct from mentions)
 - `--type <RELATIONSHIP_NAME>` — Relationship name: one declared on the source node's schema, or a built-in one (`member_of`, `has_child`, `mentions`, `has_role`) (required)
 - `--to <TO>` — Target node ID: the record acted upon (required)
 - `--edge-data <EDGE_DATA>` — Optional JSON-encoded edge properties
+
+**`nodespace relationship delete`** — Delete a typed relationship edge between two nodes. Neither node is changed. Deleting an edge that does not exist succeeds
+
+- `--from <FROM>` — Source node ID, as it was given to `relationship create` (required)
+- `--type <RELATIONSHIP_NAME>` — Relationship name the edge was created with (required)
+- `--to <TO>` — Target node ID (required)
 
 **`nodespace relationship get`** — List nodes related to a given node via a named relationship
 
@@ -1105,19 +1286,21 @@ Inspect and resolve the local conflict journal (list, show, dismiss, adopt, merg
 
 Review shipped changes to built-in items you have edited (pending, show, take, keep)
 
-**`nodespace seed pending`** — List the built-in items you have edited that have a newer shipped version: kind, title, which part (config or guidance), and when you last edited it
+**`nodespace seed pending`** — List the built-in items you have edited that have a newer shipped version: kind, title, which part (config, guidance or context paths), and when you last edited it
 
 **`nodespace seed show`** — Show one pending item's shipped version and your version
 
 - `<ITEM>` — The item's node id, or its exact title as `nodespace seed pending` lists it (required)
 - `--config` — The item's config: its name and its fields
 - `--guidance` — The item's guidance: its body
+- `--context-paths` — A built-in type's context paths: what a context read of a node of that type follows
 
 **`nodespace seed take`** — Replace your version of one part of one item with the shipped version. Discards your edit to that part; asks for confirmation unless `--yes` is passed
 
 - `<ITEM>` — The item's node id, or its exact title as `nodespace seed pending` lists it (required)
 - `--config` — The item's config: its name and its fields
 - `--guidance` — The item's guidance: its body
+- `--context-paths` — A built-in type's context paths: what a context read of a node of that type follows
 - `--yes` — Take the shipped version without prompting. Required when there is no interactive terminal: taking discards an edit, so it is never done unattended without this flag
 
 **`nodespace seed keep`** — Keep your version of one part of one item. It stops being pending until the shipped version changes again
@@ -1125,6 +1308,7 @@ Review shipped changes to built-in items you have edited (pending, show, take, k
 - `<ITEM>` — The item's node id, or its exact title as `nodespace seed pending` lists it (required)
 - `--config` — The item's config: its name and its fields
 - `--guidance` — The item's guidance: its body
+- `--context-paths` — A built-in type's context paths: what a context read of a node of that type follows
 
 ### `nodespace session`
 
@@ -1134,6 +1318,9 @@ Manage PTY agent sessions (launch, attach, list, kill)
 
 - `<AGENT>` — Agent to launch: claude-code, codex, antigravity, pi, opencode (required)
 - `--prompt <PROMPT>` — Initial prompt passed to the agent at launch time
+- `--project <PROJECT>` — Id of the project to launch the session for. The session runs in that project's folder on this machine. Without it the session runs in a private folder of its own
+- `--folder <FOLDER>` — The project's folder on this machine: the absolute path of its checkout. Needed the first time a session is launched for a project, and remembered on this machine from then on
+- `--task <TASK>` — Id of the task to launch the session for. The agent's plugin opens with that task's context
 - `--cols <COLS>` — Terminal width in columns (defaults to current terminal width)
 - `--rows <ROWS>` — Terminal height in rows (defaults to current terminal height)
 
@@ -1146,6 +1333,11 @@ Manage PTY agent sessions (launch, attach, list, kill)
 **`nodespace session kill`** — Terminate a running session
 
 - `<SESSION_ID>` — Session ID to terminate (required)
+
+**`nodespace session report-harness-session`** — Tell NodeSpace the agent's own id for the conversation running in a launched session. An agent's plugin runs this when the session starts
+
+- `<HARNESS_SESSION_ID>` — The agent's own id for the conversation: the one its resume flag takes (required)
+- `--session <SESSION>` — The launched session to report for. A launched session's environment names it in `NODESPACE_SESSION` (required, env: `NODESPACE_SESSION`)
 
 ### `nodespace database`
 
@@ -1183,41 +1375,41 @@ Uninstall NodeSpace: stop daemon, remove binaries and service registration
 
 Install, remove, or check the NodeSpace skill for detected AI-agent harnesses (Claude Code, Codex, Antigravity CLI, OpenCode, Pi) -- the CLI-only equivalent of the desktop app's first-launch skill installer -- and fetch the graph's own skills for a task (`guidance`)
 
-**`nodespace skill install`** — Detect AI-agent harnesses and install the NodeSpace skill into them. Safe to re-run: a harness whose skill files are already current is left alone and reported as up to date, one holding an older skill is updated, and a harness installed since the last run is picked up
+**`nodespace skill install`** — Detect AI-agent harnesses and install the NodeSpace skill into them. A harness with a plugin system (Claude Code, Pi, OpenCode) also gets the NodeSpace plugin, in the folder it loads plugins from. Any other (Codex, Antigravity) gets one marked block in its own user-level instructions file, which is created when absent; nothing else in that file is touched. Safe to re-run: a harness whose files are already current is left alone and reported as up to date, one holding an older skill is updated, and a harness installed since the last run is picked up
 
 - `--yes` — Install without prompting for confirmation. Implied automatically when stdin/stdout isn't a terminal (CI, a script, an agent's non-interactive shell) — mirrors install.sh's `--gui`/`--no-gui` no-TTY default: never hang waiting on a prompt that can't be answered
 
-**`nodespace skill uninstall`** — Remove the NodeSpace skill from detected (or specified) harnesses
+**`nodespace skill uninstall`** — Remove the NodeSpace skill from detected (or specified) harnesses, with the plugin or the instructions block installed beside it. Of an instructions file only the marked block is removed
 
-**`nodespace skill status`** — Report which harnesses currently have the skill installed, and which are present on this machine without it
+**`nodespace skill status`** — Report which harnesses currently have the skill installed, and which are present on this machine without it. For each that has it, says whether its plugin or its instructions block is installed too
 
-**`nodespace skill guidance`** — Fetch the skills that match a task, each with its instructions, the commands of the tools it names, and the schemas of the types the task touches. With no task, list every skill by name and description, with the list's version. Covers the built-in skills, skills a user wrote and skills an installed workflow added. Output is always provenance-marked (a banner in human mode, a `"provenance": "graph-fetched"` envelope in `--json` mode), because it is read from the graph and anyone with write access can edit it
+**`nodespace skill guidance`** — Fetch the skills that match a task, each with its instructions, the commands of the tools it names, and the schemas of the types the task touches. With no task, list every skill by name and what it is for, with the list's version. Covers the built-in skills, skills a user wrote and skills an installed workflow added. Output is always provenance-marked (a banner in human mode, a `"provenance": "graph-fetched"` envelope in `--json` mode), because it is read from the graph and anyone with write access can edit it
 
-- `<QUERY>` — The task at hand, in your own words (e.g. "add an issue to the current cycle", "define a new type with an enum field"). Matched by meaning against every skill's name and description, ranked the way the in-app agent ranks skills. Omit it, or pass an empty string, to list every skill by name and description without its instructions
+- `<QUERY>` — The task at hand, in your own words (e.g. "add a task to the spec", "define a new type with an enum field"). Matched by meaning against every skill's name and `use_for`, ranked the way the in-app agent ranks skills. Omit it, or pass an empty string, to list every skill by name and what it is for without its instructions
 - `--limit <LIMIT>` — Maximum number of skills to return for a task. The daemon returns at most 10 whatever is asked for. Ignored when listing
 
 **`nodespace skill get`** — Fetch one skill by its exact name or its id, with what `guidance` returns for a matched skill: its instructions, the commands of the tools it names and the schemas it is linked to, provenance-marked the same way. Use it when you already know which skill you need, from the list or from an earlier fetch. Fails when no skill has that name
 
 - `<NAME_OR_ID>` — The skill's exact name as the list shows it (e.g. "Node Deletion"), or its node id. Case-sensitive, no normalization (required)
 
-**`nodespace skill reset`** — Discard a user's customization of a seeded skill node's config (description/exclusion/tool_whitelist/max_iterations) and/or guidance (procedural markdown), restoring it to the currently-compiled template, whether or not a newer shipped version is pending (`nodespace seed pending`). It overrides the `_seed.config_modified` / `_seed.guidance_modified` durability guard (ADR-072) — reconciliation on daemon startup never discards a user-modified aspect on its own. Requires confirmation unless `--yes` is passed
+**`nodespace skill reset`** — Discard a user's customization of a seeded skill node's config (use_for/not_for/tool_whitelist/max_iterations) and/or guidance (procedural markdown), restoring it to the currently-compiled template, whether or not a newer shipped version is pending (`nodespace seed pending`). It overrides the `_seed.config_modified` / `_seed.guidance_modified` durability guard (ADR-072) — reconciliation on daemon startup never discards a user-modified aspect on its own. Requires confirmation unless `--yes` is passed
 
 - `<KEY>` — The seed key to reset — a seeded skill's exact title (e.g. "Research & Search"), matching what `nodespace skill guidance` fetches under. Case-sensitive, no normalization (required)
 - `--guidance` — Reset the procedural guidance (markdown children) to the currently- compiled template, discarding any customization
-- `--config` — Reset the config (description/exclusion/tool_whitelist/max_iterations) to the currently-compiled template, discarding any customization
+- `--config` — Reset the config (use_for/not_for/tool_whitelist/max_iterations) to the currently-compiled template, discarding any customization
 - `--all` — Reset both guidance and config — equivalent to passing both flags
 - `--yes` — Reset without prompting for confirmation. Required in a non-interactive context (no `--yes` there is a hard error, not an auto-proceed) — unlike `install`/`mcp enable`, this is the one destructive path in the system (ADR-072), and auto-confirming a content discard with no one watching would defeat the point of requiring confirmation at all
 
 ### `nodespace mcp`
 
-Host a stdio MCP server exposing one passthrough tool, for bash-less MCP surfaces (e.g. Claude Desktop's Chat tab) that cannot shell this CLI directly — see `commands::mcp` for the architecture and its ADR-038 trust-boundary controls. Disabled until `nodespace mcp install` explicitly turns it on. With no subcommand, hosts the stdio server itself — what a client config launches, not something a person types directly
+Host a stdio MCP server exposing one passthrough tool, for bash-less MCP surfaces (e.g. Claude Desktop's Chat tab) that cannot shell this CLI directly — see `commands::mcp` for the architecture and its ADR-038 trust-boundary controls. Enabled by `nodespace mcp install`, which writes the client config (`uninstall` removes it, `status` reports it); none of the three needs the daemon. Calls act on whichever database is active and cannot select another. With no subcommand, hosts the stdio server itself — what a client config launches, not something a person types directly
 
-**`nodespace mcp install`** — Configure a detected bash-less MCP client (currently Claude Desktop) to launch `nodespace mcp`, and enable the passthrough tool. Safe to re-run
+**`nodespace mcp install`** — Configure a detected bash-less MCP client (currently Claude Desktop) to launch `nodespace mcp`. The config is what enables the passthrough tool; it acts on whichever database is active when a client calls it. Needs no daemon. Safe to re-run
 
 - `--yes` — Install without prompting for confirmation. Implied automatically when stdin/stdout isn't a terminal — mirrors `nodespace skill install`'s `--yes`
 
-**`nodespace mcp uninstall`** — Remove the MCP config this wrote from every detected client and disable the passthrough tool again
+**`nodespace mcp uninstall`** — Remove the MCP config this wrote from every detected client, which disables the passthrough tool. Needs no daemon
 
-**`nodespace mcp status`** — Report whether the passthrough tool is enabled and which clients currently have a config pointing at it
+**`nodespace mcp status`** — Report whether a detected client has a config pointing at this server (that is what enables the tool). Needs no daemon
 
 <!-- END GENERATED: cli-surface -->
