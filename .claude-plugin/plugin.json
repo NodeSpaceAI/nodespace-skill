@@ -1,6 +1,6 @@
 {
   "name": "nodespace",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Puts NodeSpace in the session: checks it is reachable, finds the project for the checkout, lists the graph's skills in the system prompt, and says when they or the item being worked on change.",
   "author": {
     "name": "NodeSpace",
