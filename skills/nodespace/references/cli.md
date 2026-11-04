@@ -484,9 +484,11 @@ nodespace node batch-get --id <id1> --id <id2> --id <id3>
 nodespace node batch-update --updates '[{"node_id":"abc","content":"new text","version":3}]'
 ```
 
-Each object in the array: `node_id` (required), `version` (optional — omit to auto-fetch, note this bypasses OCC), `content`, `node_type`, `properties`.
+Each object in the array: `node_id` (required), `version` (optional — omitted or null means unguarded: the item updates whatever is current and bypasses OCC), `content`, `node_type`, `properties`.
 
 **Output:** `{"count":N,"updated":["id1",…],"failed":[{"node_id":"…","error":"…"}]}`
+
+Items are applied independently. If any item lands in `failed` (node not found, invalid properties, or a stale `version`), the output is still printed in full and the command exits non-zero.
 
 ### Semantic search
 
@@ -525,7 +527,7 @@ nodespace import dir ./docs --replace                                # re-import
 
 Import is a repeatable sync, not a one-off bulk load: re-running `import dir`/`import file` without `--replace` skips a document already imported (no duplicates), and `--replace` refreshes its child subtree from the fresh parse while keeping the root node — so anything that already links to it stays valid. A first import and a refresh are the same command, just with or without `--replace`.
 
-`import dir` accepts more than one directory in a single call — one process, one summary, instead of a shell loop calling it once per directory. `--auto-collection-routing` still routes each file relative to *its own* directory's root, never a synthesised common ancestor across the directories passed, so two unrelated trees can't produce surprising collection paths. Per-directory failures (a bad path, an unreadable folder) are reported in the combined results rather than aborting the rest. Passing exactly one directory behaves exactly as `import dir <dir>` always has.
+`import dir` accepts more than one directory in a single call — one process, one summary, instead of a shell loop calling it once per directory. `--auto-collection-routing` still routes each file relative to *its own* directory's root, never a synthesised common ancestor across the directories passed, so two unrelated trees can't produce surprising collection paths. Per-directory failures (a bad path, an unreadable folder) are reported in the combined results rather than aborting the rest. Passing exactly one directory behaves exactly as `import dir <dir>` always has. The walk imports a symlink to a markdown file like the file itself, and skips symlinked directories (so a link back to an ancestor cannot loop) and dangling links. With `--json`, a single directory with no markdown files prints `[]`.
 
 `--auto-collection-routing` turns directory structure into collection membership for free — the folder layout becomes the collection hierarchy, no separate tagging step. Combined with `--replace`, markdown-on-disk becomes a viable source of truth: import once to build the tree, re-import to keep it current.
 
@@ -1029,6 +1031,8 @@ It removes only the free NodeSpace. On a Mac where `/Applications/NodeSpace.app`
 
 NodeSpace's `.pkg` installer and its Homebrew cask refuse the same way over such an app, and name the same remedy: the person moves `/Applications/NodeSpace.app` to the Trash, then the install is run again.
 
+On a Mac where the `.pkg` installer put files outside the home folder (`/Library/LaunchAgents/app.nodespace.daemon.plist`, `/usr/local/bin/nodespace`, `/usr/local/bin/nodespaced`), `nodespace uninstall` removes what the person owns, then exits non-zero without printing "NodeSpace uninstalled." It lists the files it left because they need administrator rights, and the `sudo rm` command that removes them. It never runs `sudo` itself. **Pass that command on for the person to run; don't run it yourself.**
+
 A run with `NODESPACE_HOME` set is not checked against the installed app. It removes only the binaries and sockets under that home, and leaves the daemon service, the agent skills and the app alone.
 
 ### Complete command surface
@@ -1044,7 +1048,7 @@ Every command, subcommand, and flag below is generated from the CLI's own defini
 
 ### `nodespace node`
 
-Operate on individual nodes (get, context, create, update, move, delete, children, query, export, batch-get, batch-update)
+Operate on individual nodes (get, context, create, update, set-status, move, delete, children, query, export, batch-get, batch-update)
 
 **`nodespace node get`** — Retrieve a node by ID
 
@@ -1127,11 +1131,11 @@ Operate on individual nodes (get, context, create, update, move, delete, childre
 
 **`nodespace node batch-update`** — Update multiple nodes in one request (OCC-aware)
 
-- `--updates <UPDATES>` — JSON-encoded array of update objects: [{"node_id":"…","content":"…","version":N}]. Each item may have: node_id (required), version (optional), content, node_type, properties (required)
+- `--updates <UPDATES>` — JSON-encoded array of update objects: [{"node_id":"…","content":"…","version":N}]. Each item may have: node_id (required), version (optional; an omitted or null version means unguarded: the item updates whatever is current), content, node_type, properties (required)
 
 ### `nodespace model`
 
-Manage the local inference model (list, load, recommended)
+Manage the local inference model (list, load, recommended, status)
 
 **`nodespace model list`** — List models in the catalog and their download/load status
 
@@ -1401,11 +1405,11 @@ Manage the daemon's registry of local databases (list, create, register, remove,
 **`nodespace database create`** — Create a brand-new database and register it
 
 - `<NAME>` — Human-facing label for the new database (required)
-- `--path <PATH>` — Explicit path for the new database file. When omitted the daemon places it under its managed database directory
+- `--path <PATH>` — Explicit path for the new database file; a relative path resolves against the current directory. When omitted the daemon places it under its managed database directory
 
 **`nodespace database register`** — Register an existing database file already present on disk
 
-- `<PATH>` — Absolute path to an existing database file to register (required)
+- `<PATH>` — Path to an existing database file to register (required)
 
 **`nodespace database remove`** — Unregister a database (never deletes the underlying file)
 
