@@ -116,7 +116,7 @@ nodespace node create --type text --content "Meeting notes" --parent <parent-id>
 
 **Options:**
 - `--type <type>` — node type: `text`, `task`, `date`, or any schema-defined type
-- `--content <text>` — the text content of the node
+- `--content <text>` — the content of the node. For `text`, `task`, `project`, `spec`, `plan` and `decision` (and types extending them) given more than one block, it is a markdown document: the first line is the node's own content (a leading `#` marker is dropped), the rest is parsed into child nodes the way `import file` parses it, and a leading `---` front matter block (a YAML mapping) becomes properties of the node. The first line must be a plain line or a heading, and a `---` block that is not a YAML mapping is refused with nothing created. A single block is stored as given, and `code-block`, `quote-block`, `table` and the other types keep multi-line content as one node
 - `--parent <id>` — optional parent node ID (creates a child node)
 - `--property key=value` / `--properties '{json}'` — set properties (see *Two ways to set properties* above)
 
@@ -139,16 +139,30 @@ A collection is identified by its name (case-insensitive): `node create --type c
 
 **If it has headings, it is a tree, not a node.** NodeSpace is one-node-per-block, with hierarchy as first-class edges — a document with sections (an ADR, a spec, a plan) decomposes into a root node plus one child per section, not one node whose `content` holds the whole document:
 
-```bash
-# Multi-call: root, then one child per section
-nodespace node create --type text --content "# ADR-071: Use collections for tagging"
-# → returns {"id": "root-id", ...}
-nodespace node create --type text --content "## Context\n..." --parent root-id
-nodespace node create --type text --content "## Decision\n..." --parent root-id
+One call is enough for a document: `node create --type decision --content '<document>'` (example below) creates the decision with `Title` as its content and the sections as its children. A front matter block at the top sets properties: a key that is a declared field of the type (`decision_status: accepted`) is set as that field and validated; any other key is stored as `custom:<key>`; a key already namespaced (`custom:x`) is stored as given and a key starting with `_` is ignored. Write the document with real line breaks, not the two characters `\n` (the CLI does not unescape them). Single-quote it: a shell expands `$` and backticks and breaks on `"` inside double quotes, and a literal apostrophe is written `'\''` (there is no stdin or file form of `--content`). The first line must be a plain line or a heading: a list item (numbered too), a table row, a horizontal rule, a checklist item, a quote or a code fence there, a `---` block that is not a YAML mapping, or a declared field given an invalid value, is refused with nothing created, so fix the document and run it again. A document that is a single block with no front matter, such as a lone `- x`, is stored as given, not refused. A CLI newer than the daemon answers `Unimplemented` for this call: tell the user to update NodeSpace and stop rather than rebuilding the document node by node. The multi-call form below does the same by hand:
 
-# Or write it to a file and import it — see `nodespace import` below. This is
-# the normal path for any multi-section content, not only bulk migration,
-# including a single document you just finished authoring.
+```bash
+# One call: the first line is the title, the rest become its children
+nodespace node create --type decision --content '---
+decision_status: accepted
+---
+# ADR-071: Use collections for tagging
+
+## Context
+Tags drifted; we don'\''t want a second grouping mechanism.
+
+## Decision
+Group with collections.'
+
+# Multi-call by hand: root, then one child per section (single block each)
+nodespace node create --type text --content '# ADR-071: Use collections for tagging'
+# → returns {"id": "root-id", ...}
+nodespace node create --type text --content '## Context' --parent root-id
+nodespace node create --type text --content '## Decision' --parent root-id
+
+# Or write it to a file and import it — see `nodespace import` below. An
+# import always makes text roots: use it for files and directories, and use the
+# single `node create` call above for one document that is a typed record.
 nodespace import file ./adr-071.md
 ```
 
@@ -376,13 +390,13 @@ This is the CLI counterpart of the property-filtering path of the local agent's 
 
 ### Run a saved query
 
-A saved query is a `query` node: a view, or a queue of work such as "Ready tasks", that someone defined once. Run it by its id or its title instead of copying its filters:
+A saved query is a `query` node: a view, or a queue of work such as "Awaiting review", that someone defined once. Run it by its id or its title instead of copying its filters:
 
 ```bash
-nodespace query run "Ready tasks"
+nodespace query run "Awaiting review"
 nodespace query run <query-id>
-nodespace --json query run "Ready tasks" --filters '[{"type":"relationship","operator":"equals","path":["project"],"node_id":"<project-id>"}]' --limit 1
-nodespace --json query run "Ready tasks" --with-context --limit 1    # the next piece of work, whole
+nodespace --json query run "Awaiting review" --filters '[{"type":"relationship","operator":"equals","path":["project"],"node_id":"<project-id>"}]' --limit 1
+nodespace --json query run "Awaiting review" --with-context --limit 1    # the next piece of work, whole
 ```
 
 It returns the nodes the query matches now, with its stored filters, sorting, limit and relative dates, and beside them the skills attached to the query itself.
@@ -936,6 +950,27 @@ A database is addressed by **name or id**. When a name is ambiguous (shared by m
 
 **Refused databases.** A database can list an extension this NodeSpace build doesn't support. The daemon then refuses to open it and changes nothing in its file. `database list` shows its status as `requires_extension` and appends what it needs after the path; with `--json` the entry carries `unsupported_extensions` and a `refusal` message (`null` for any other database). `nodespace diagnostics` lists every database the same way, in both forms. `database use` accepts such a database and prints a `Warning:` line on stderr: once it is the default, every command without `--database` is refused. Any command routed to such a database, without `--database` when it is the default or with `--database` naming it, exits non-zero with that refusal message and a `Download …` line. Relay the message to the user verbatim, with the download line; the `refusal` field is the message alone, so when relaying from a listing, say the download link comes with the error of any command run against that database. Do not retry, and never move, rename, copy or edit the file to get around it. To keep working, target another database with `--database`. Ask the user before `database use`: it changes the default for every client, the desktop app included.
 
+### Manage credentials
+
+A remote tool refers to a credential by name (`keychain:<name>`); the value is kept in this device's credential store, never in a node. These subcommands are daemon-global and are not affected by `--database`. The value belongs to the user, and the MCP passthrough refuses these commands.
+
+```bash
+# Store a credential: the value is typed at a hidden prompt, or read from standard input
+nodespace secret set github-token
+
+# Remove a credential
+nodespace secret delete github-token
+
+# List the stored names (never the values)
+nodespace secret list-names
+```
+
+The value is never an argument, so it does not land in shell history. A name is 1 to 64 characters from letters, digits, `.`, `_` and `-`. A value is 1 to 16384 bytes of UTF-8 text. Before `set` or `delete` changes anything, the daemon asks the user to confirm in a system dialog on the Mac's own screen (Touch ID, a paired Apple Watch or the login password); a program cannot answer it. Run over SSH, the dialog still appears on the Mac's screen. Where no dialog can be shown (a locked screen, another user at the console, a daemon running outside a logged-in session, or a platform without one) the change is refused; on such a platform use an `env:<NAME>` reference instead.
+
+### Approve a remote tool
+
+A remote tool (`tool-cli`, `tool-rest` or `tool-mcp`) is offered to the model only after the user approves it on this device with `nodespace tool approve <node-id>`. The command shows the tool's name, description, binding, credential references, parameter schema and, for a tool that starts a program, the program file and its SHA-256, and a code (`XXXX-XXXX-XXXX`) only the daemon can make. After the user types the tool's name at a terminal, the daemon asks them to confirm in a system dialog on the Mac's own screen (Touch ID, a paired Apple Watch or the login password) that starts with the same code, then names the tool and the full program path it runs or the host it sends a call to, then the credentials it uses and the arguments; only that confirmation writes the approval, and a program cannot answer the dialog. Confirm only a dialog whose code and program or host match what the command printed, and only one you started. A program given by a bare name is approved as its full path on the daemon's `PATH`, which the approval writes into the tool, and the program file's content is pinned: if the file changes (an update, `brew upgrade`), the tool does not run until it is approved again. The pin holds only against a file the user cannot write: the command and the dialog warn when the program file, a folder above it or the interpreter it names belongs to or is writable by the user, or when a script starts another program from the `PATH`. Any change to the tool afterwards (an edit, even one that is undone, turning it off, archiving it, merging it, deleting it), any change to a schema, and a restart of the daemon (a reboot, an update, Quit in the tray), ends the approval until it is approved again. Only the daemon of a signed release, or a development build, approves tools, and only on macOS; the daemon of a Homebrew formula install is signed ad hoc, so it cannot approve tools (`nodespace secret set` still works there). It is the user's step: it refuses to run without a terminal, the MCP passthrough refuses it, and the daemon refuses an approval from any program it started for a tool. Run over SSH, the dialog appears on the Mac's own screen, so it needs someone there; with the screen locked, or another user at the console, it is refused. Ask the user to run it; never try to approve a tool yourself.
+
 ### Database settings
 
 Each database holds its own settings in its `database-settings` node, id `database-settings-singleton`. There is no machine-wide settings file: a setting applies to the database a command is routed to (`--database`, else the default), and two databases open in one daemon each behave by their own.
@@ -1063,7 +1098,7 @@ Operate on individual nodes (get, context, create, update, set-status, move, del
 **`nodespace node create`** — Create a new node
 
 - `--type <NODE_TYPE>` — Node type, e.g. `text`, `task`, `date` (required)
-- `--content <CONTENT>` — Content (plain text or markdown). Omit for a type with a title template (e.g. `person`): its name comes from the template's fields, set with `--property`, and content is rejected. A value may begin with a dash, as a checklist item or a list line does
+- `--content <CONTENT>` — Content (plain text or markdown). For a document type (`text`, `task`, `project`, `spec`, `plan`, `decision`) given more than one block, the first line is the node's content (a leading `#` marker is dropped) and the rest is parsed into child nodes, as `import file` parses it; a leading `---` front matter block becomes properties of the node. The first line must be a plain line or a heading, and a `---` block that is not a YAML mapping is refused; nothing is created. Other types keep multi-line content as one node. Omit for a type with a title template (e.g. `person`): its name comes from the template's fields, set with `--property`, and content is rejected. A value may begin with a dash, as a checklist item or a list line does
 - `--parent <PARENT>` — Parent node ID (omit to create a root node)
 - `--property <PROPERTIES>` — Set one or more properties: `--property key=value` (repeatable). Values are parsed as JSON when possible (numbers, booleans, `null`, arrays, objects), otherwise treated as a plain string. Required this way for any schema field that is `required` with no default — validation runs at create time, so there is no way to supply it afterward via `update`
 - `--properties <JSON>` — Set several properties at once from one JSON object: `--properties '{"key":"value"}'`. Each value keeps the JSON type it is written with, so this is the form for nested values and for a string that reads as a number (`{"estimate":"3"}`). May be combined with `--property`, which wins for a key given both ways
@@ -1424,6 +1459,28 @@ Manage the daemon's registry of local databases (list, create, register, remove,
 
 - `<DATABASE>` — Database to make the default, by name or id (required)
 
+### `nodespace secret`
+
+Manage the credentials remote tools refer to as `keychain:<name>` (set, delete, list-names). Values are never shown and never passed as arguments
+
+**`nodespace secret set`** — Store a credential under a name. The value is read from a hidden prompt on a terminal, or from standard input; it is never an argument
+
+- `<NAME>` — Name a tool refers to as `keychain:<name>` (letters, digits, `.`, `_`, `-`) (required)
+
+**`nodespace secret delete`** — Remove a credential
+
+- `<NAME>` — The name to remove (required)
+
+**`nodespace secret list-names`** — List the stored names. Values are never shown
+
+### `nodespace tool`
+
+Approve a remote tool on this device (`approve`). Shows exactly what is approved, asks you to type the tool's name, then to confirm in a system dialog; run it yourself at a terminal on the Mac's screen
+
+**`nodespace tool approve`** — Show what approving a remote tool would approve, and approve it after you type its name and confirm in the system dialog. Must be run at a terminal
+
+- `<NODE_ID>` — The id of the tool node (required)
+
 ### `nodespace uninstall`
 
 Uninstall NodeSpace: stop daemon, remove binaries and service registration
@@ -1432,7 +1489,7 @@ Uninstall NodeSpace: stop daemon, remove binaries and service registration
 
 Install, remove, or check the NodeSpace skill for detected AI-agent harnesses (Claude Code, Codex, Antigravity CLI, OpenCode, Pi) -- the CLI-only equivalent of the desktop app's first-launch skill installer -- and fetch the graph's own skills for a task (`guidance`)
 
-**`nodespace skill install`** — Detect AI-agent harnesses and install the NodeSpace skill into them. A harness with a plugin system (Claude Code, Pi, OpenCode) also gets the NodeSpace plugin, in the folder it loads plugins from. Any other (Codex, Antigravity) gets one marked block in its own user-level instructions file, which is created when absent; nothing else in that file is touched. Safe to re-run: a harness whose files are already current is left alone and reported as up to date, one holding an older skill is updated, and a harness installed since the last run is picked up
+**`nodespace skill install`** — Detect AI-agent harnesses and install the NodeSpace skill into them. A harness with a plugin system (Claude Code, Pi, OpenCode) also gets the NodeSpace plugin, in the folder it loads plugins from. Codex and Antigravity get hooks, and each also gets one marked block in its own user-level instructions file, which is created when absent; nothing else in that file is touched. Safe to re-run: a harness whose files are already current is left alone and reported as up to date, one holding an older skill is updated, and a harness installed since the last run is picked up
 
 - `--yes` — Install without prompting for confirmation. Implied automatically when stdin/stdout isn't a terminal (CI, a script, an agent's non-interactive shell) — mirrors install.sh's `--gui`/`--no-gui` no-TTY default: never hang waiting on a prompt that can't be answered
 

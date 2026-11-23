@@ -9,10 +9,22 @@ description: >
   behind existing code; when recording a decision or discovery that should
   outlive this session; or when asked to "check nodespace".
 allowed-tools: Bash(nodespace:*)
-compatibility: Targets NodeSpace app v0.3.11. Requires either a shell with the `nodespace` CLI on $PATH, or an MCP client connected to `nodespace mcp` (its bash-less passthrough) -- see Reaching NodeSpace in SKILL.md.
+compatibility: Targets NodeSpace app v0.3.12. Requires either a shell with the `nodespace` CLI on $PATH, or an MCP client connected to `nodespace mcp` (its bash-less passthrough) -- see Reaching NodeSpace in SKILL.md.
 ---
 
 # NodeSpace Skill
+
+## First: Check the CLI Version
+
+**From a shell, your first action in any session that uses NodeSpace is to run `nodespace --version`. Run no other `nodespace` command, and do not save or search anything, until you have done it and the version is 0.3.12 or newer.** Through the `nodespace` tool, which refuses `--version`, skip this check: the preflight table below catches an old CLI by its error.
+
+This file needs a `nodespace` CLI of version **0.3.12 or newer**. An older CLI lacks commands this file and the instructions it points to rely on (`nodespace skill guidance` is one), and an agent that improvises with whatever the old CLI has records things wrongly.
+
+Compare the version it prints. If the version is older than 0.3.12:
+
+- **Stop.** Run no other `nodespace` command and write nothing to NodeSpace.
+- **Tell the user to update NodeSpace** (the desktop app, or `brew upgrade --cask nodespaceai/nodespace/nodespace`), saying which version is installed, that 0.3.12 or newer is needed, and which command or behaviour this file describes that the old CLI is missing.
+- **Do not fall back** to older commands or to the basic commands that still work, and **do not upgrade the CLI yourself**: updating software is the user's call, the same as running the installer.
 
 NodeSpace is context infrastructure for AI-native development — a local-first knowledge graph running on this machine.
 
@@ -21,18 +33,6 @@ NodeSpace is context infrastructure for AI-native development — a local-first 
 It persists across sessions — what you save today is searchable tomorrow, and your context window does not survive the turn.
 
 **So: read from NodeSpace before you write code or documents, and write back to it when you decide something.** If you're about to author a spec, an ADR, a design, or a plan — or you need the reasoning and constraints behind existing code — check here first. Whatever the repository cannot tell you about *why*, this can.
-
-## First: Check the CLI Version
-
-This file needs a `nodespace` CLI of version **0.3.11 or newer**. An older CLI lacks commands this file and the instructions it points to rely on (`nodespace skill guidance` is one), and an agent that improvises with whatever the old CLI has records things wrongly.
-
-From a shell, run `nodespace --version` before anything else in the session and compare. If the version is older than 0.3.11:
-
-- **Stop.** Run no other `nodespace` command and write nothing to NodeSpace.
-- **Tell the user to update NodeSpace** (the desktop app, or `brew upgrade --cask nodespaceai/nodespace/nodespace`), saying which version is installed, that 0.3.11 or newer is needed, and which command or behaviour this file describes that the old CLI is missing.
-- **Do not fall back** to older commands or to the basic commands that still work, and **do not upgrade the CLI yourself**: updating software is the user's call, the same as running the installer.
-
-Through the `nodespace` tool there is no `--version` (it refuses it); the preflight table below catches an old CLI by its error instead.
 
 ## How NodeSpace Thinks (Mental Model)
 
@@ -56,7 +56,7 @@ Through the `nodespace` tool there is no `--version` (it refuses it); the prefli
 Use NodeSpace as a working memory across sessions:
 
 1. **Search at session start** — search for prior context before you begin. (`nodespace search "topic"`)
-2. **Save as you go** — save discoveries, decisions, and summaries during the session. Don't wait until the end. (`nodespace node create --type text --content "…"`)
+2. **Save as you go** — once the version check above has passed (through the `nodespace` tool: once the preflight table has not reported an old CLI), save discoveries, decisions, and summaries during the session. Don't wait until the end. (`nodespace node create --type text --content "…"`) A multi-block markdown `--content` is a document: its first line is the node's content and the rest becomes child nodes (details in `references/cli.md`: write it with real line breaks, single-quoted; the first line must be a plain line or a heading, and if the call fails as unimplemented, tell the user to update NodeSpace).
 3. **It persists across sessions** — your context window does not. Anything worth remembering next time should be stored.
 
 Date nodes make temporal retrieval reliable: if a finding is time-bound, attach it under today's date node so future searches can scope by day.
@@ -76,7 +76,7 @@ The CLI talks to the `nodespaced` daemon on this machine, and a command that can
 | What a command returns | Cause | What to do |
 |---------|-------|----------|
 | `command not found: nodespace` | The CLI is not installed or not on `$PATH` | Tell the user and propose installing it. If they confirm, run `sh -c "$(curl -fsSL https://nodespace.ai/install.sh)" -- --no-gui` (the CLI only, non-interactively), then retry. If the shell has not picked up the new `$PATH`, ask them to open a new terminal. If they decline, stop. |
-| `unrecognized subcommand`, `unexpected argument` or `unknown option` for a command or flag this file or its references describe | The CLI is older than this file needs (0.3.11 or newer) | Stop. Tell the user to update NodeSpace, naming the installed version if you know it and the command that is missing. Do not retry with older commands, do not carry on with the commands that still work, and do not upgrade the CLI yourself. |
+| `unrecognized subcommand`, `unexpected argument` or `unknown option` for a command or flag this file or its references describe | The CLI is older than this file needs (0.3.12 or newer) | Stop. Tell the user to update NodeSpace, naming the installed version if you know it and the command that is missing. Do not retry with older commands, do not carry on with the commands that still work, and do not upgrade the CLI yourself. |
 | `Failed to run the nodespace CLI at ...` (from the `nodespace` tool) | The CLI behind the tool is missing or broken | Tell the user NodeSpace needs reinstalling: the desktop app, or `brew install --cask nodespaceai/nodespace/nodespace`. You cannot install it from there. |
 | `Could not connect to nodespaced` | The daemon is not running | Tell the user to start it with `nodespaced` (it starts on login when installed from the DMG). Do not retry until they confirm. |
 | `This database needs …` and a `Download …` line | The database requires an extension this build doesn't support; the daemon refuses it and leaves the file untouched | Relay the message to the user verbatim, download line included. Don't retry, and never move or edit the file. Offer another database instead (`references/cli.md`, *Manage local databases*). |
@@ -141,11 +141,11 @@ NODESPACE_DATABASE=work nodespace search "meeting notes"
 ```
 
 **Running a saved query.** A saved query is a view or a queue of work someone
-defined once ("Ready tasks"). Run it by its id or title; do not copy its filters:
+defined once ("Awaiting review"). Run it by its id or title; do not copy its filters:
 
 ```bash
-nodespace query run "Ready tasks"
-nodespace query run "Ready tasks" --filters '[{"type":"relationship","operator":"equals","path":["project"],"node_id":"<project-id>"}]'
+nodespace query run "Awaiting review"
+nodespace query run "Awaiting review" --filters '[{"type":"relationship","operator":"equals","path":["project"],"node_id":"<project-id>"}]'
 ```
 
 `--filters` narrows that one run: the filters are ANDed with the stored ones and
@@ -161,7 +161,7 @@ It follows the context paths the node's type declares (`context_paths` in
 ```bash
 nodespace node context <task-id>
 nodespace node context <task-id> --path project
-nodespace query run "Ready tasks" --with-context --limit 1   # the next item, read the same way
+nodespace query run "Awaiting review" --with-context --limit 1   # the next item, read the same way
 ```
 
 `query run --with-context` returns each item that way, with every skill printed
